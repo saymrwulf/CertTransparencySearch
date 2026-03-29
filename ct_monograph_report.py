@@ -97,6 +97,43 @@ def short_issuer(issuer_name: str) -> str:
     return issuer_name
 
 
+def pct(count: int, total: int) -> str:
+    if total <= 0:
+        return "0.0%"
+    return f"{(count / total) * 100:.1f}%"
+
+
+def purpose_label(category: str) -> str:
+    return {
+        "tls_server_only": "TLS server only",
+        "tls_server_and_client": "TLS server and client auth",
+        "client_auth_only": "Client auth only",
+        "smime_only": "S/MIME only",
+        "code_signing_only": "Code signing only",
+        "mixed_or_other": "Mixed or other",
+        "no_eku": "No EKU",
+    }.get(category, category)
+
+
+def purpose_meaning(category: str) -> str:
+    return {
+        "tls_server_only": "Standard public website or API endpoint certificate.",
+        "tls_server_and_client": "Server certificate whose EKU also permits client-certificate use.",
+        "client_auth_only": "Identity-style certificate for a person, robot, or agent in mTLS.",
+        "smime_only": "Email-signing or email-encryption certificate.",
+        "code_signing_only": "Software-signing certificate rather than a web-endpoint certificate.",
+        "mixed_or_other": "Unusual or mixed EKU combination requiring case-by-case review.",
+        "no_eku": "Certificate without an Extended Key Usage extension.",
+    }.get(category, "Certificate purpose category.")
+
+
+def collapse_issuer_counts_by_family(issuer_counts: dict[str, int]) -> Counter[str]:
+    families: Counter[str] = Counter()
+    for issuer_name, count in issuer_counts.items():
+        families[short_issuer(issuer_name)] += count
+    return families
+
+
 def build_issuer_family_rows(report: dict[str, object]) -> list[dict[str, str]]:
     issuer_trust = report["issuer_trust"]
     families: dict[str, dict[str, object]] = {}
@@ -142,8 +179,39 @@ def render_markdown(args: argparse.Namespace, report: dict[str, object]) -> None
     hits = report["hits"]
     groups = report["groups"]
     purpose_summary = report["purpose_summary"]
+    total_certificates = len(report["classifications"])
     dual_items = [item for item in report["classifications"] if item.category == "tls_server_and_client"]
     dual_issuer_counts = Counter(short_issuer(item.issuer_name) for item in dual_items)
+    server_only_count = purpose_summary.category_counts.get("tls_server_only", 0)
+    dual_count = purpose_summary.category_counts.get("tls_server_and_client", 0)
+    server_only_issuer_families = collapse_issuer_counts_by_family(
+        purpose_summary.issuer_breakdown.get("tls_server_only", {})
+    )
+    purpose_rows = [
+        [
+            purpose_label(category),
+            str(count),
+            pct(count, total_certificates),
+            purpose_meaning(category),
+        ]
+        for category, count in [
+            ("tls_server_only", purpose_summary.category_counts.get("tls_server_only", 0)),
+            ("tls_server_and_client", purpose_summary.category_counts.get("tls_server_and_client", 0)),
+            ("client_auth_only", purpose_summary.category_counts.get("client_auth_only", 0)),
+            ("smime_only", purpose_summary.category_counts.get("smime_only", 0)),
+            ("code_signing_only", purpose_summary.category_counts.get("code_signing_only", 0)),
+            ("mixed_or_other", purpose_summary.category_counts.get("mixed_or_other", 0)),
+            ("no_eku", purpose_summary.category_counts.get("no_eku", 0)),
+        ]
+    ]
+    eku_template_rows = [
+        [template, str(count), pct(count, total_certificates)]
+        for template, count in purpose_summary.eku_templates.items()
+    ]
+    key_usage_rows = [
+        [template, str(count), pct(count, total_certificates)]
+        for template, count in purpose_summary.key_usage_templates.items()
+    ]
     issuer_rows = [
         [
             row["family"],
@@ -267,6 +335,12 @@ def render_markdown(args: argparse.Namespace, report: dict[str, object]) -> None
     lines.append("")
     lines.append("This chapter addresses a key ambiguity. A certificate can be technically valid for several uses. The corpus was therefore assessed from the actual EKU and KeyUsage fields, not from the hostname style alone.")
     lines.append("")
+    lines.append("### Purpose Map")
+    lines.append("")
+    lines.extend(md_table(["Usage Class", "Certificates", "Share", "Meaning"], purpose_rows))
+    lines.append("")
+    lines.append("The basic picture is simple: the corpus is overwhelmingly made of ordinary public TLS server certificates, with a smaller minority whose EKU also permits client-certificate use.")
+    lines.append("")
     lines.append("**Plain-language explanation of the usage categories**")
     lines.append("")
     lines.extend(
@@ -281,26 +355,55 @@ def render_markdown(args: argparse.Namespace, report: dict[str, object]) -> None
     lines.append("")
     lines.append("The result is clean. This corpus is entirely TLS-capable. There is no evidence of a separate S/MIME or code-signing estate, and there are no client-auth-only certificates.")
     lines.append("")
+    lines.append("### EKU and KeyUsage Templates")
+    lines.append("")
+    lines.append("At the template level, the corpus is even simpler than the certificate count suggests. Only two EKU templates appear at all, and one KeyUsage template dominates almost completely.")
+    lines.append("")
+    lines.extend(md_table(["EKU Template", "Certificates", "Share"], eku_template_rows))
+    lines.append("")
+    lines.extend(md_table(["KeyUsage Template", "Certificates", "Share"], key_usage_rows))
+    lines.append("")
+    lines.append("### The Majority Pattern: Server-Only Public TLS")
+    lines.append("")
+    lines.extend(
+        [
+            f"- Server-only certificates account for {server_only_count} of {total_certificates} certificates, or {pct(server_only_count, total_certificates)} of the corpus.",
+            f"- Server-only validity starts are split between {', '.join(f'{year} ({count})' for year, count in purpose_summary.validity_start_years.get('tls_server_only', {}).items())}.",
+            f"- Server-only issuer-family concentration: {', '.join(f'{name} ({count})' for name, count in server_only_issuer_families.most_common())}.",
+            "- This is the normal public WebPKI server-certificate pattern for websites, APIs, and edge service front doors.",
+        ]
+    )
+    lines.append("")
+    lines.append("This majority bucket is not background noise. It is the main operational reality visible in the scan: public DNS names covered by publicly trusted endpoint certificates.")
+    lines.append("")
     if dual_rows:
-        lines.append("### What Dual EKU Means")
+        lines.append("### The Minority Pattern: Dual EKU")
         lines.append("")
         lines.append("EKU means *allowed purpose*, not *observed real-world use*. A dual-EKU certificate is a certificate whose X.509 policy says it may be used both as a TLS server certificate and as a TLS client certificate.")
         lines.append("")
         lines.extend(
             [
-                f"- Dual-EKU certificates in this corpus: {len(dual_items)}.",
+                f"- Dual-EKU certificates in this corpus: {dual_count}, or {pct(dual_count, total_certificates)} of the corpus.",
                 f"- Issuer-family concentration inside the dual-EKU bucket: {', '.join(f'{name} ({count})' for name, count in dual_issuer_counts.most_common())}.",
                 f"- Dual-EKU Subject CN families that also have a strict server-only sibling: {len(purpose_summary.dual_eku_subject_cns_with_server_only_sibling)}.",
                 f"- Dual-EKU Subject CN families that appear only in the dual-EKU bucket: {len(purpose_summary.dual_eku_subject_cns_without_server_only_sibling)}.",
+                f"- Dual-EKU validity starts are split between {', '.join(f'{year} ({count})' for year, count in purpose_summary.validity_start_years.get('tls_server_and_client', {}).items())}.",
             ]
         )
         lines.append("")
         lines.append("The important interpretation point is this: these still look like public hostname certificates, not person or robot identity certificates. They have DNS-style Subject CN values, DNS SAN lists, and public WebPKI issuers. The best reading is therefore not 'this is a separate client-certificate estate', but rather 'some server certificates were issued from a template that also allowed clientAuth'.")
         lines.append("")
-        lines.append("### Full Dual-EKU Certificate Catalogue")
-        lines.append("")
-        lines.extend(md_table(["Subject CN", "Valid From", "Valid To", "Issuer", "DNS SANs"], dual_rows))
-        lines.append("")
+    lines.append("### What Is Not Present")
+    lines.append("")
+    lines.extend(
+        [
+            "- There are no client-auth-only certificates in the corpus.",
+            "- There are no S/MIME certificates in the corpus.",
+            "- There are no code-signing certificates in the corpus.",
+            "- There are no mixed-or-other EKU combinations and no certificates missing EKU entirely.",
+        ]
+    )
+    lines.append("")
     lines.append("## Chapter 4: Naming Architecture")
     lines.append("")
     lines.append("**Management Summary**")
@@ -388,7 +491,14 @@ def render_markdown(args: argparse.Namespace, report: dict[str, object]) -> None
     lines.append("")
     lines.extend(md_table(["ID", "Basis", "Type", "Certs", "CNs", "Top Stacks"], family_rows))
     lines.append("")
-    lines.append("## Appendix B: Detailed Inventory Appendix")
+    if dual_rows:
+        lines.append("## Appendix B: Detailed Dual-EKU Catalogue")
+        lines.append("")
+        lines.append("This appendix keeps the complete dual-EKU evidence available without letting the minority case dominate the main analytical chapter.")
+        lines.append("")
+        lines.extend(md_table(["Subject CN", "Valid From", "Valid To", "Issuer", "DNS SANs"], dual_rows))
+        lines.append("")
+    lines.append("## Appendix C: Detailed Inventory Appendix")
     lines.append("")
     lines.append("The full issuer-first family inventory is reproduced below so that the monograph remains complete rather than merely interpretive.")
     lines.append("")
@@ -401,9 +511,33 @@ def render_latex(args: argparse.Namespace, report: dict[str, object]) -> None:
     hits = report["hits"]
     groups = report["groups"]
     purpose_summary = report["purpose_summary"]
+    total_certificates = len(report["classifications"])
     issuer_trust = report["issuer_trust"]
     issuer_family_rows = build_issuer_family_rows(report)
     dual_items = [item for item in report["classifications"] if item.category == "tls_server_and_client"]
+    dual_issuer_counts = Counter(short_issuer(item.issuer_name) for item in dual_items)
+    server_only_count = purpose_summary.category_counts.get("tls_server_only", 0)
+    dual_count = purpose_summary.category_counts.get("tls_server_and_client", 0)
+    server_only_issuer_families = collapse_issuer_counts_by_family(
+        purpose_summary.issuer_breakdown.get("tls_server_only", {})
+    )
+    purpose_rows = [
+        (
+            purpose_label(category),
+            str(count),
+            pct(count, total_certificates),
+            purpose_meaning(category),
+        )
+        for category, count in [
+            ("tls_server_only", purpose_summary.category_counts.get("tls_server_only", 0)),
+            ("tls_server_and_client", purpose_summary.category_counts.get("tls_server_and_client", 0)),
+            ("client_auth_only", purpose_summary.category_counts.get("client_auth_only", 0)),
+            ("smime_only", purpose_summary.category_counts.get("smime_only", 0)),
+            ("code_signing_only", purpose_summary.category_counts.get("code_signing_only", 0)),
+            ("mixed_or_other", purpose_summary.category_counts.get("mixed_or_other", 0)),
+            ("no_eku", purpose_summary.category_counts.get("no_eku", 0)),
+        ]
+    ]
     appendix_pdf_path = args.appendix_pdf_output.resolve().as_posix()
     lines: list[str] = [
         r"\documentclass[11pt]{article}",
@@ -550,26 +684,69 @@ def render_latex(args: argparse.Namespace, report: dict[str, object]) -> None:
     lines.append(
         r"Extended Key Usage tells software what a certificate is allowed to do. In plain terms, this is the difference between a website certificate, a client-identity certificate, an email certificate, and a code-signing certificate."
     )
-    dual_issuer_counts = Counter(short_issuer(item.issuer_name) for item in dual_items)
     lines.extend(
         [
-            r"\subsection{What Dual EKU Means}",
-            rf"In this corpus, {purpose_summary.category_counts.get('tls_server_and_client', 0)} certificates carry both \texttt{{serverAuth}} and \texttt{{clientAuth}} in Extended Key Usage. That means the certificate is \emph{{allowed}} to be used in either role. It does not prove that the certificate is actually being used as a client identity in production.",
-            rf"The dual-EKU bucket is concentrated in these issuer families: {latex_escape(', '.join(f'{name} ({count})' for name, count in dual_issuer_counts.most_common()))}.",
-            rf"{len(purpose_summary.dual_eku_subject_cns_with_server_only_sibling)} dual-EKU Subject-CN families also have a strict server-only sibling, while {len(purpose_summary.dual_eku_subject_cns_without_server_only_sibling)} currently appear only in the dual-EKU bucket.",
-            r"The important interpretation point is that these still look like public hostname certificates: DNS-style Subject CN values, DNS SAN lists, and public WebPKI issuers. The better reading is therefore not ``separate client-certificate estate'', but ``server certificates issued from a template that also allowed clientAuth''.",
-            r"\subsection{Dual-EKU Catalogue}",
-            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.38\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth}}",
+            r"\subsection{Purpose Map}",
+            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.46\linewidth}}",
             r"\toprule",
-            r"Subject CN & Valid From & Valid To & Issuer & DNS SANs \\",
+            r"Usage Class & Certs & Share & Meaning \\",
             r"\midrule",
         ]
     )
-    for item in dual_items:
+    for label, count, share, meaning in purpose_rows:
         lines.append(
-            rf"{latex_escape(item.subject_cn)} & {latex_escape(item.valid_from_utc[:10])} & {latex_escape(item.valid_to_utc[:10])} & {latex_escape(short_issuer(item.issuer_name))} & {len(item.san_dns_names)} \\"
+            rf"{latex_escape(label)} & {count} & {latex_escape(share)} & {latex_escape(meaning)} \\"
         )
     lines.extend([r"\bottomrule", r"\end{longtable}"])
+    lines.append(
+        r"The basic picture is simple: the corpus is overwhelmingly made of ordinary public TLS server certificates, with a smaller minority whose EKU also permits client-certificate use."
+    )
+    lines.extend(
+        [
+            r"\subsection{EKU and KeyUsage Templates}",
+            r"At the template level, the corpus is even simpler than the certificate count suggests. Only two EKU templates appear at all, and one KeyUsage template dominates almost completely.",
+            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.58\linewidth} >{\raggedleft\arraybackslash}p{0.14\linewidth} >{\raggedleft\arraybackslash}p{0.14\linewidth}}",
+            r"\toprule",
+            r"EKU Template & Certs & Share \\",
+            r"\midrule",
+        ]
+    )
+    for template, count in purpose_summary.eku_templates.items():
+        lines.append(rf"{latex_escape(template)} & {count} & {latex_escape(pct(count, total_certificates))} \\")
+    lines.extend([r"\bottomrule", r"\end{longtable}"])
+    lines.extend(
+        [
+            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.58\linewidth} >{\raggedleft\arraybackslash}p{0.14\linewidth} >{\raggedleft\arraybackslash}p{0.14\linewidth}}",
+            r"\toprule",
+            r"KeyUsage Template & Certs & Share \\",
+            r"\midrule",
+        ]
+    )
+    for template, count in purpose_summary.key_usage_templates.items():
+        lines.append(rf"{latex_escape(template)} & {count} & {latex_escape(pct(count, total_certificates))} \\")
+    lines.extend([r"\bottomrule", r"\end{longtable}"])
+    lines.extend(
+        [
+            r"\subsection{The Majority Pattern: Server-Only Public TLS}",
+            rf"Server-only certificates account for {server_only_count} of {total_certificates} certificates, or {latex_escape(pct(server_only_count, total_certificates))} of the corpus.",
+            rf"Server-only validity starts are split between {latex_escape(', '.join(f'{year} ({count})' for year, count in purpose_summary.validity_start_years.get('tls_server_only', {}).items()))}.",
+            rf"Server-only issuer-family concentration is {latex_escape(', '.join(f'{name} ({count})' for name, count in server_only_issuer_families.most_common()))}.",
+            r"This is the normal public WebPKI server-certificate pattern for websites, APIs, and edge service front doors.",
+            r"This majority bucket is not background noise. It is the main operational reality visible in the scan: public DNS names covered by publicly trusted endpoint certificates.",
+        ]
+    )
+    lines.extend(
+        [
+            r"\subsection{The Minority Pattern: Dual EKU}",
+            rf"In this corpus, {dual_count} certificates carry both \texttt{{serverAuth}} and \texttt{{clientAuth}} in Extended Key Usage. That is {latex_escape(pct(dual_count, total_certificates))} of the corpus. This means the certificate is \emph{{allowed}} to be used in either role. It does not prove that the certificate is actually being used as a client identity in production.",
+            rf"The dual-EKU bucket is concentrated in these issuer families: {latex_escape(', '.join(f'{name} ({count})' for name, count in dual_issuer_counts.most_common()))}.",
+            rf"{len(purpose_summary.dual_eku_subject_cns_with_server_only_sibling)} dual-EKU Subject-CN families also have a strict server-only sibling, while {len(purpose_summary.dual_eku_subject_cns_without_server_only_sibling)} currently appear only in the dual-EKU bucket.",
+            rf"Dual-EKU validity starts are split between {latex_escape(', '.join(f'{year} ({count})' for year, count in purpose_summary.validity_start_years.get('tls_server_and_client', {}).items()))}.",
+            r"The important interpretation point is that these still look like public hostname certificates: DNS-style Subject CN values, DNS SAN lists, and public WebPKI issuers. The better reading is therefore not ``separate client-certificate estate'', but ``server certificates issued from a template that also allowed clientAuth''.",
+            r"\subsection{What Is Not Present}",
+            r"There are no client-auth-only certificates, no S/MIME certificates, no code-signing certificates, no mixed-or-other EKU combinations, and no certificates missing EKU entirely.",
+        ]
+    )
 
     lines.append(r"\section{Naming Architecture}")
     add_summary(
@@ -665,6 +842,23 @@ def render_latex(args: argparse.Namespace, report: dict[str, object]) -> None:
             rf"{latex_escape(row['group_id'])} & {latex_escape(row['basis'])} & {latex_escape(row['type'])} & {row['certificates']} & {row['subjects']} & {latex_escape(row['top_stacks'])} \\"
         )
     lines.extend([r"\bottomrule", r"\end{longtable}"])
+
+    if dual_items:
+        lines.extend(
+            [
+                r"\section{Detailed Dual-EKU Catalogue}",
+                r"This appendix keeps the complete dual-EKU evidence available without letting the minority case dominate the main analytical chapter.",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.38\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth}}",
+                r"\toprule",
+                r"Subject CN & Valid From & Valid To & Issuer & DNS SANs \\",
+                r"\midrule",
+            ]
+        )
+        for item in dual_items:
+            lines.append(
+                rf"{latex_escape(item.subject_cn)} & {latex_escape(item.valid_from_utc[:10])} & {latex_escape(item.valid_to_utc[:10])} & {latex_escape(short_issuer(item.issuer_name))} & {len(item.san_dns_names)} \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
 
     lines.extend(
         [
