@@ -932,6 +932,7 @@ def render_latex(
         r"\usepackage{fancyhdr}",
         r"\usepackage{titlesec}",
         r"\usepackage[most]{tcolorbox}",
+        r"\usepackage{pdflscape}",
         r"\usepackage{pdfpages}",
         r"\defaultfontfeatures{Ligatures=TeX,Scale=MatchLowercase}",
         r"\setmainfont{Palatino}",
@@ -945,14 +946,18 @@ def render_latex(
         r"\hypersetup{colorlinks=true,linkcolor=Accent,urlcolor=Accent,pdfauthor={CertTransparencySearch},pdftitle={CT and DNS Monograph}}",
         r"\setlength{\parindent}{0pt}",
         r"\setlength{\parskip}{6pt}",
+        r"\setlength{\emergencystretch}{4em}",
         r"\setlength{\headheight}{16pt}",
+        r"\setlength{\tabcolsep}{4.2pt}",
+        r"\renewcommand{\arraystretch}{1.12}",
+        r"\raggedbottom",
         r"\setcounter{tocdepth}{2}",
         r"\pagestyle{fancy}",
         r"\fancyhf{}",
         r"\renewcommand{\headrulewidth}{0pt}",
         r"\fancyfoot[C]{\sffamily\footnotesize \thepage}",
-        r"\titleformat{\section}{\sffamily\bfseries\LARGE\color{Ink}}{\thesection}{0.8em}{}",
-        r"\titleformat{\subsection}{\sffamily\bfseries\Large\color{Ink}}{\thesubsection}{0.8em}{}",
+        r"\titleformat{\section}{\sffamily\bfseries\LARGE\color{Ink}\raggedright}{\thesection}{0.8em}{}",
+        r"\titleformat{\subsection}{\sffamily\bfseries\Large\color{Ink}\raggedright}{\thesubsection}{0.8em}{}",
         r"\tcbset{panel/.style={enhanced,breakable,boxrule=0.55pt,arc=3pt,left=9pt,right=9pt,top=8pt,bottom=8pt,colback=white,colframe=Line}}",
         r"\newcommand{\SummaryBox}[1]{\begin{tcolorbox}[panel,colback=Panel]#1\end{tcolorbox}}",
         r"\begin{document}",
@@ -1278,6 +1283,7 @@ def render_latex(
         [
             r"\appendix",
             r"\section{Full Family Catalogue}",
+            r"\begin{landscape}",
             r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.38\linewidth} >{\raggedright\arraybackslash}p{0.15\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.15\linewidth}}",
             r"\toprule",
             r"ID & Basis & Type & Certs & CNs & Top Stacks \\",
@@ -1288,12 +1294,13 @@ def render_latex(
         lines.append(
             rf"{latex_escape(row['group_id'])} & {latex_escape(row['basis'])} & {latex_escape(row['type'])} & {row['certificates']} & {row['subjects']} & {latex_escape(row['top_stacks'])} \\"
         )
-    lines.extend([r"\bottomrule", r"\end{longtable}"])
+    lines.extend([r"\bottomrule", r"\end{longtable}", r"\end{landscape}"])
 
     lines.extend(
         [
             r"\section{Historical Red-Flag Detail}",
             r"This appendix keeps the detailed historical evidence inside the monograph so that the reader does not need a second report.",
+            r"\begin{landscape}",
             r"\subsection{Current Red-Flag Inventory}",
         ]
     )
@@ -1500,6 +1507,7 @@ def render_latex(
 
     lines.extend(
         [
+            r"\end{landscape}",
             r"\section{Detailed Inventory Appendix}",
             r"This appendix reproduces the full issuer-first family inventory so that the publication remains complete rather than merely interpretive.",
             rf"\includepdf[pages=-,pagecommand={{}}]{{{latex_escape(appendix_pdf_path)}}}",
