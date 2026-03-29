@@ -55,19 +55,19 @@ This assessment classifies the current corpus into:
 - S/MIME only
 - code signing only
 
-## Consolidated Master Report
+## Monograph Report
 
 ```bash
-.venv/bin/python ct_master_report.py \
+.venv/bin/python ct_monograph_report.py \
   --domains-file domains.local.txt \
   --cache-ttl-seconds 0 \
   --dns-cache-ttl-seconds 86400 \
-  --markdown-output output/consolidated-corpus-report.md \
-  --latex-output output/consolidated-corpus-report.tex \
-  --pdf-output output/consolidated-corpus-report.pdf
+  --markdown-output output/corpus/monograph.md \
+  --latex-output output/corpus/monograph.tex \
+  --pdf-output output/corpus/monograph.pdf
 ```
 
-This is the main document for readers. It combines:
+This is the main publication-grade document for readers. It combines:
 
 - data-integrity and completeness proof
 - certificate inventory and issuer analysis
@@ -76,6 +76,27 @@ This is the main document for readers. It combines:
 - public DNS delivery analysis
 - crosswalk between certificate structure and DNS structure
 - confidence and limit statements
+- a full issuer-first inventory appendix embedded into the final PDF
+
+The monograph also emits a standalone appendix inventory in the same output area:
+
+- `output/corpus/appendix-inventory.md`
+- `output/corpus/appendix-inventory.tex`
+- `output/corpus/appendix-inventory.pdf`
+
+## Short Consolidated Report
+
+If you still want the shorter executive version, use:
+
+```bash
+.venv/bin/python ct_master_report.py \
+  --domains-file domains.local.txt \
+  --cache-ttl-seconds 0 \
+  --dns-cache-ttl-seconds 86400 \
+  --markdown-output output/corpus/consolidated-corpus-report.md \
+  --latex-output output/corpus/consolidated-corpus-report.tex \
+  --pdf-output output/corpus/consolidated-corpus-report.pdf
+```
 
 ## Public Repo Rules
 
