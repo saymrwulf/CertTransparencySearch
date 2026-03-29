@@ -97,17 +97,61 @@ def short_issuer(issuer_name: str) -> str:
     return issuer_name
 
 
+def build_issuer_family_rows(report: dict[str, object]) -> list[dict[str, str]]:
+    issuer_trust = report["issuer_trust"]
+    families: dict[str, dict[str, object]] = {}
+    for issuer_name, count in report["issuer_counts"].most_common():
+        family = short_issuer(issuer_name)
+        row = families.setdefault(
+            family,
+            {
+                "family": family,
+                "certificates": 0,
+                "variants": [],
+                "major_webpki": True,
+            },
+        )
+        row["certificates"] += count
+        row["variants"].append(issuer_name)
+        row["major_webpki"] = bool(row["major_webpki"] and issuer_trust[issuer_name].major_webpki)
+    ordered = sorted(
+        families.values(),
+        key=lambda item: (-int(item["certificates"]), str(item["family"]).casefold()),
+    )
+    result: list[dict[str, str]] = []
+    for item in ordered:
+        variant_labels = [
+            str(name).split("CN=")[-1]
+            for name in sorted(item["variants"], key=str.casefold)
+        ]
+        result.append(
+            {
+                "family": str(item["family"]),
+                "certificates": str(item["certificates"]),
+                "variant_count": str(len(variant_labels)),
+                "major_webpki": "yes" if item["major_webpki"] else "no",
+                "variants": ", ".join(variant_labels),
+            }
+        )
+    return result
+
+
 def render_markdown(args: argparse.Namespace, report: dict[str, object]) -> None:
     args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
     appendix_markdown = args.appendix_markdown_output.read_text(encoding="utf-8")
     hits = report["hits"]
     groups = report["groups"]
     purpose_summary = report["purpose_summary"]
-    issuer_trust = report["issuer_trust"]
     dual_items = [item for item in report["classifications"] if item.category == "tls_server_and_client"]
     issuer_rows = [
-        [short_issuer(issuer_name), str(count), "yes" if issuer_trust[issuer_name].major_webpki else "no"]
-        for issuer_name, count in report["issuer_counts"].most_common()
+        [
+            row["family"],
+            row["certificates"],
+            row["variant_count"],
+            row["major_webpki"],
+            row["variants"],
+        ]
+        for row in build_issuer_family_rows(report)
     ]
     family_rows = [
         [
@@ -194,11 +238,13 @@ def render_markdown(args: argparse.Namespace, report: dict[str, object]) -> None
     lines.append("")
     lines.append("### Issuer Trust Table")
     lines.append("")
-    lines.extend(md_table(["Issuer Family", "Count", "Major WebPKI"], issuer_rows))
+    lines.extend(md_table(["Issuer Family", "Certificates", "Variants", "Major WebPKI", "Issuer Variants Seen"], issuer_rows))
     lines.append("")
     lines.append("**What WebPKI trust means**")
     lines.append("")
     lines.append("A WebPKI-trusted issuer is a certificate authority trusted by mainstream browser and operating-system trust stores for public TLS. That matters because it tells you these certificates are not part of a private PKI hidden inside one organisation. They are intended to be valid in the public Internet trust model.")
+    lines.append("")
+    lines.append("This table is intentionally collapsed to issuer families. The detailed issuer variant names remain visible in the appendix inventory, where the reader needs them for forensic precision rather than quick orientation.")
     lines.append("")
     lines.append("## Chapter 3: Intended Purpose of the Certificates")
     lines.append("")
@@ -332,6 +378,7 @@ def render_latex(args: argparse.Namespace, report: dict[str, object]) -> None:
     groups = report["groups"]
     purpose_summary = report["purpose_summary"]
     issuer_trust = report["issuer_trust"]
+    issuer_family_rows = build_issuer_family_rows(report)
     dual_items = [item for item in report["classifications"] if item.category == "tls_server_and_client"]
     appendix_pdf_path = args.appendix_pdf_output.resolve().as_posix()
     lines: list[str] = [
@@ -450,17 +497,20 @@ def render_latex(args: argparse.Namespace, report: dict[str, object]) -> None:
     lines.extend(
         [
             r"\subsection{Issuer Trust Table}",
-            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.60\linewidth} >{\raggedleft\arraybackslash}p{0.12\linewidth} >{\raggedleft\arraybackslash}p{0.16\linewidth}}",
+            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedleft\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.39\linewidth}}",
             r"\toprule",
-            r"Issuer & Count & Major WebPKI \\",
+            r"Issuer Family & Certs & Variants & Major WebPKI & Issuer Variants Seen \\",
             r"\midrule",
         ]
     )
-    for issuer_name, count in report["issuer_counts"].most_common():
+    for row in issuer_family_rows:
         lines.append(
-            rf"{latex_escape(short_issuer(issuer_name))} & {count} & {'yes' if issuer_trust[issuer_name].major_webpki else 'no'} \\"
+            rf"{latex_escape(row['family'])} & {row['certificates']} & {row['variant_count']} & {row['major_webpki']} & {latex_escape(row['variants'])} \\"
         )
     lines.extend([r"\bottomrule", r"\end{longtable}"])
+    lines.append(
+        r"This table is intentionally collapsed to issuer families for readability. The appendix inventory keeps the exact issuer variant names for forensic review."
+    )
 
     lines.append(r"\section{Intended Purpose of the Certificates}")
     add_summary(

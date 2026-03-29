@@ -1,8 +1,14 @@
 # Certificate Transparency Search
 
-This project scans Certificate Transparency for currently valid leaf certificates whose SAN sets contain configured search terms, verifies the certificates locally, inspects revocation state, classifies intended usage from EKU and KeyUsage, and scans the public DNS names exposed by the certificate corpus.
+This project builds a publication-grade report set from Certificate Transparency and public DNS:
 
-The repository is designed for public source control:
+- it finds currently valid leaf certificates whose SAN values contain configured search terms
+- it verifies locally that the certificates are real leaf certificates rather than CA certificates or precertificates
+- it assesses intended usage from EKU and KeyUsage
+- it scans the DNS names exposed by the SAN corpus
+- it produces readable Markdown, LaTeX, and PDF outputs
+
+The project is designed for public source control:
 
 - real search terms live only in `domains.local.txt`
 - generated artefacts live only in `output/`
@@ -10,97 +16,213 @@ The repository is designed for public source control:
 
 None of those paths should be committed.
 
-## Setup
+## What You Need On A Fresh Machine
+
+### Required software
+
+- `git`
+- `python3`
+- `make`
+- `dig`
+- `xelatex`
+
+### What each dependency is for
+
+- `python3`: runs the scanners and report generators
+- `make`: gives you short repeatable commands instead of long manual command lines
+- `dig`: performs the live DNS scan
+- `xelatex`: compiles the PDF reports
+
+If `xelatex` is missing, the Markdown and LaTeX outputs can still be generated, but the PDF targets will fail.
+
+## Fresh Install On Another Computer
+
+Clone the repository from your chosen remote and enter the directory:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-cp domains.example.txt domains.local.txt
+git clone <repository-url>
+cd CertTransparencySearch
 ```
 
-Edit `domains.local.txt` with the real search terms you want to scan.
+Create the local Python environment and install dependencies:
 
-## Safety Against Silent Undercounts
+```bash
+make bootstrap
+```
 
-The scanner now refuses to run if the configured per-domain candidate cap is lower than the live raw match count from crt.sh. This prevents silent truncation when the raw identity set is larger than the cap.
+Create the local-only search-term file:
 
-## Core Inventory Report
+```bash
+make init-config
+```
+
+Then edit `domains.local.txt` and replace the placeholder values with the real search terms you want to scan.
+
+## Local Search Terms
+
+The tracked file is:
+
+- `domains.example.txt`
+
+The local-only file is:
+
+- `domains.local.txt`
+
+Rules:
+
+- keep real search terms only in `domains.local.txt`
+- do not rename that file unless you also pass `DOMAINS=...` to `make`
+- do not commit it
+
+## One-Command Runs
+
+### Main publication
+
+This is the publication-grade monograph with appendices:
+
+```bash
+make monograph
+```
+
+Outputs:
+
+- `output/corpus/monograph.md`
+- `output/corpus/monograph.tex`
+- `output/corpus/monograph.pdf`
+- `output/corpus/appendix-inventory.md`
+- `output/corpus/appendix-inventory.tex`
+- `output/corpus/appendix-inventory.pdf`
+
+### Supporting purpose assessment
+
+```bash
+make purpose
+```
+
+Outputs:
+
+- `output/corpus/certificate-purpose-assessment.md`
+- `output/corpus/certificate-purpose-assessment.json`
+
+### Shorter executive report
+
+```bash
+make consolidated
+```
+
+Outputs:
+
+- `output/corpus/consolidated-corpus-report.md`
+- `output/corpus/consolidated-corpus-report.tex`
+- `output/corpus/consolidated-corpus-report.pdf`
+
+### Full operator run
+
+This creates the local config if missing, then runs the purpose assessment and the full monograph:
+
+```bash
+make all
+```
+
+## Reproducibility And Run Behaviour
+
+The default `Makefile` values are:
+
+- `DOMAINS=domains.local.txt`
+- `CACHE_TTL=0`
+- `DNS_CACHE_TTL=86400`
+- `MAX_CANDIDATES=10000`
+
+This means:
+
+- Certificate Transparency is refreshed live on every normal run.
+- DNS results are reused for up to one day unless you override the DNS cache TTL.
+- The query cap is high enough for the current corpus and the scanner will refuse to run if the live raw match count exceeds the cap.
+
+If you want to override values:
+
+```bash
+make monograph CACHE_TTL=86400 DNS_CACHE_TTL=86400
+```
+
+Or:
+
+```bash
+make monograph DOMAINS=/path/to/other.local.txt
+```
+
+## Manual Commands
+
+If you do not want to use `make`, the equivalent commands are:
+
+### Inventory appendix source
 
 ```bash
 .venv/bin/python ct_scan.py \
   --domains-file domains.local.txt \
   --cache-ttl-seconds 0 \
-  --output output/current-valid-certificates.md \
-  --latex-output output/current-valid-certificates.tex \
-  --pdf-output output/current-valid-certificates.pdf
+  --max-candidates-per-domain 10000 \
+  --output output/corpus/current-valid-certificates.md \
+  --latex-output output/corpus/current-valid-certificates.tex \
+  --pdf-output output/corpus/current-valid-certificates.pdf
 ```
 
-This report is the issuer-first inventory view.
-
-## Purpose Assessment
+### Purpose assessment
 
 ```bash
 .venv/bin/python ct_usage_assessment.py \
   --domains-file domains.local.txt \
   --cache-ttl-seconds 0 \
-  --markdown-output output/certificate-purpose-assessment.md \
-  --json-output output/certificate-purpose-assessment.json
+  --max-candidates 10000 \
+  --markdown-output output/corpus/certificate-purpose-assessment.md \
+  --json-output output/corpus/certificate-purpose-assessment.json
 ```
 
-This assessment classifies the current corpus into:
-
-- TLS server only
-- TLS server and client auth
-- client auth only
-- S/MIME only
-- code signing only
-
-## Monograph Report
-
-```bash
-.venv/bin/python ct_monograph_report.py \
-  --domains-file domains.local.txt \
-  --cache-ttl-seconds 0 \
-  --dns-cache-ttl-seconds 86400 \
-  --markdown-output output/corpus/monograph.md \
-  --latex-output output/corpus/monograph.tex \
-  --pdf-output output/corpus/monograph.pdf
-```
-
-This is the main publication-grade document for readers. It combines:
-
-- data-integrity and completeness proof
-- certificate inventory and issuer analysis
-- purpose assessment
-- naming-pattern interpretation
-- public DNS delivery analysis
-- crosswalk between certificate structure and DNS structure
-- confidence and limit statements
-- a full issuer-first inventory appendix embedded into the final PDF
-
-The monograph also emits a standalone appendix inventory in the same output area:
-
-- `output/corpus/appendix-inventory.md`
-- `output/corpus/appendix-inventory.tex`
-- `output/corpus/appendix-inventory.pdf`
-
-## Short Consolidated Report
-
-If you still want the shorter executive version, use:
+### Consolidated report
 
 ```bash
 .venv/bin/python ct_master_report.py \
   --domains-file domains.local.txt \
   --cache-ttl-seconds 0 \
   --dns-cache-ttl-seconds 86400 \
+  --max-candidates-per-domain 10000 \
   --markdown-output output/corpus/consolidated-corpus-report.md \
   --latex-output output/corpus/consolidated-corpus-report.tex \
   --pdf-output output/corpus/consolidated-corpus-report.pdf
 ```
 
+### Full monograph
+
+```bash
+.venv/bin/python ct_monograph_report.py \
+  --domains-file domains.local.txt \
+  --cache-ttl-seconds 0 \
+  --dns-cache-ttl-seconds 86400 \
+  --max-candidates-per-domain 10000 \
+  --markdown-output output/corpus/monograph.md \
+  --latex-output output/corpus/monograph.tex \
+  --pdf-output output/corpus/monograph.pdf \
+  --appendix-markdown-output output/corpus/appendix-inventory.md \
+  --appendix-latex-output output/corpus/appendix-inventory.tex \
+  --appendix-pdf-output output/corpus/appendix-inventory.pdf
+```
+
+## Project Structure
+
+- `ct_scan.py`: core CT scan, leaf verification, grouping, and detailed inventory report
+- `ct_usage_assessment.py`: EKU and KeyUsage assessment
+- `ct_dns_utils.py`: DNS scanning and provider-signature logic
+- `ct_master_report.py`: shorter consolidated report
+- `ct_monograph_report.py`: publication-grade monograph with appendices
+- `Makefile`: reproducible operator workflow
+
+## Safety Against Silent Undercounts
+
+The scanner checks the live raw identity-row count before it executes the capped query. If the configured cap is too low, it stops with an error instead of silently returning an incomplete corpus.
+
 ## Public Repo Rules
 
-- Keep `domains.local.txt` local only.
-- Never commit `output/`.
-- Never commit `.cache/`.
-- If you need a sample config in git, update `domains.example.txt`, not `domains.local.txt`.
+- keep `domains.local.txt` local only
+- never commit `output/`
+- never commit `.cache/`
+- if you need a sample config in git, update `domains.example.txt`, not `domains.local.txt`
