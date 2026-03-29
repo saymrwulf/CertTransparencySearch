@@ -5,7 +5,7 @@ CACHE_TTL ?= 0
 DNS_CACHE_TTL ?= 86400
 MAX_CANDIDATES ?= 10000
 
-.PHONY: bootstrap install init-config inventory purpose consolidated monograph all
+.PHONY: bootstrap install init-config inventory purpose lineage consolidated monograph all
 
 bootstrap:
 	python3 -m venv .venv
@@ -33,6 +33,15 @@ purpose:
 		--markdown-output output/corpus/certificate-purpose-assessment.md \
 		--json-output output/corpus/certificate-purpose-assessment.json
 
+lineage:
+	$(PYTHON) ct_lineage_report.py \
+		--domains-file $(DOMAINS) \
+		--cache-ttl-seconds $(CACHE_TTL) \
+		--max-candidates-per-domain $(MAX_CANDIDATES) \
+		--markdown-output output/corpus/certificate-lineage-report.md \
+		--latex-output output/corpus/certificate-lineage-report.tex \
+		--pdf-output output/corpus/certificate-lineage-report.pdf
+
 consolidated:
 	$(PYTHON) ct_master_report.py \
 		--domains-file $(DOMAINS) \
@@ -56,4 +65,4 @@ monograph:
 		--appendix-latex-output output/corpus/appendix-inventory.tex \
 		--appendix-pdf-output output/corpus/appendix-inventory.pdf
 
-all: init-config purpose monograph
+all: init-config purpose lineage monograph

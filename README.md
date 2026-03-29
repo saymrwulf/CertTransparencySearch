@@ -104,6 +104,26 @@ Outputs:
 - `output/corpus/certificate-purpose-assessment.md`
 - `output/corpus/certificate-purpose-assessment.json`
 
+### Historical lineage analysis
+
+This report extends the analysis across current and expired certificates to study:
+
+- repeated issuance under the same Subject CN
+- Subject CN with different Subject DN over time
+- Subject CN with different issuing CA or vendor over time
+- Subject CN with different SAN profiles over time
+- issuance bursts and step-change start dates
+
+```bash
+make lineage
+```
+
+Outputs:
+
+- `output/corpus/certificate-lineage-report.md`
+- `output/corpus/certificate-lineage-report.tex`
+- `output/corpus/certificate-lineage-report.pdf`
+
 ### Shorter executive report
 
 ```bash
@@ -118,7 +138,7 @@ Outputs:
 
 ### Full operator run
 
-This creates the local config if missing, then runs the purpose assessment and the full monograph:
+This creates the local config if missing, then runs the purpose assessment, historical lineage analysis, and the full monograph:
 
 ```bash
 make all
@@ -191,6 +211,18 @@ If you do not want to use `make`, the equivalent commands are:
   --pdf-output output/corpus/consolidated-corpus-report.pdf
 ```
 
+### Historical lineage report
+
+```bash
+.venv/bin/python ct_lineage_report.py \
+  --domains-file domains.local.txt \
+  --cache-ttl-seconds 0 \
+  --max-candidates-per-domain 10000 \
+  --markdown-output output/corpus/certificate-lineage-report.md \
+  --latex-output output/corpus/certificate-lineage-report.tex \
+  --pdf-output output/corpus/certificate-lineage-report.pdf
+```
+
 ### Full monograph
 
 ```bash
@@ -211,6 +243,7 @@ If you do not want to use `make`, the equivalent commands are:
 
 - `ct_scan.py`: core CT scan, leaf verification, grouping, and detailed inventory report
 - `ct_usage_assessment.py`: EKU and KeyUsage assessment
+- `ct_lineage_report.py`: historical Subject CN, Subject DN, issuer, SAN, and issuance-burst analysis
 - `ct_dns_utils.py`: DNS scanning and provider-signature logic
 - `ct_master_report.py`: shorter consolidated report
 - `ct_monograph_report.py`: publication-grade monograph with appendices
