@@ -1,0 +1,6 @@
+# Copy this file to domains.local.txt and replace the placeholders.
+# One search term per line.
+# Do not commit domains.local.txt or any real search terms.
+
+brand.example
+service.example

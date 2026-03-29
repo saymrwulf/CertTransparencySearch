@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.cache/
+output/
+*.local.txt
+domains.txt
+.DS_Store
