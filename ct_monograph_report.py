@@ -143,6 +143,7 @@ def render_markdown(args: argparse.Namespace, report: dict[str, object]) -> None
     groups = report["groups"]
     purpose_summary = report["purpose_summary"]
     dual_items = [item for item in report["classifications"] if item.category == "tls_server_and_client"]
+    dual_issuer_counts = Counter(short_issuer(item.issuer_name) for item in dual_items)
     issuer_rows = [
         [
             row["family"],
@@ -173,6 +174,10 @@ def render_markdown(args: argparse.Namespace, report: dict[str, object]) -> None
             str(len(item.san_dns_names)),
         ]
         for item in dual_items
+    ]
+    dns_stack_rows = [
+        [label, str(count)]
+        for label, count in report["dns_stack_counts"].most_common(12)
     ]
     lines: list[str] = []
     lines.append("# CT and DNS Monograph")
@@ -277,6 +282,21 @@ def render_markdown(args: argparse.Namespace, report: dict[str, object]) -> None
     lines.append("The result is clean. This corpus is entirely TLS-capable. There is no evidence of a separate S/MIME or code-signing estate, and there are no client-auth-only certificates.")
     lines.append("")
     if dual_rows:
+        lines.append("### What Dual EKU Means")
+        lines.append("")
+        lines.append("EKU means *allowed purpose*, not *observed real-world use*. A dual-EKU certificate is a certificate whose X.509 policy says it may be used both as a TLS server certificate and as a TLS client certificate.")
+        lines.append("")
+        lines.extend(
+            [
+                f"- Dual-EKU certificates in this corpus: {len(dual_items)}.",
+                f"- Issuer-family concentration inside the dual-EKU bucket: {', '.join(f'{name} ({count})' for name, count in dual_issuer_counts.most_common())}.",
+                f"- Dual-EKU Subject CN families that also have a strict server-only sibling: {len(purpose_summary.dual_eku_subject_cns_with_server_only_sibling)}.",
+                f"- Dual-EKU Subject CN families that appear only in the dual-EKU bucket: {len(purpose_summary.dual_eku_subject_cns_without_server_only_sibling)}.",
+            ]
+        )
+        lines.append("")
+        lines.append("The important interpretation point is this: these still look like public hostname certificates, not person or robot identity certificates. They have DNS-style Subject CN values, DNS SAN lists, and public WebPKI issuers. The best reading is therefore not 'this is a separate client-certificate estate', but rather 'some server certificates were issued from a template that also allowed clientAuth'.")
+        lines.append("")
         lines.append("### Full Dual-EKU Certificate Catalogue")
         lines.append("")
         lines.extend(md_table(["Subject CN", "Valid From", "Valid To", "Issuer", "DNS SANs"], dual_rows))
@@ -319,6 +339,10 @@ def render_markdown(args: argparse.Namespace, report: dict[str, object]) -> None
     )
     lines.append("")
     lines.append("DNS is the public routing layer. It does not tell you everything about an application, but it does tell you where a public name lands: directly on an IP, through an alias chain, through a CDN, through an API gateway, or onto a specialist platform.")
+    lines.append("")
+    lines.append("### Delivery Stack Counts")
+    lines.append("")
+    lines.extend(md_table(["Stack Signature", "Count"], dns_stack_rows))
     lines.append("")
     lines.append("### Plain-Language Platform Glossary")
     lines.append("")
@@ -447,7 +471,8 @@ def render_latex(args: argparse.Namespace, report: dict[str, object]) -> None:
             lines.append(rf"\item {latex_escape(item)}")
         lines.append(r"\end{itemize}}")
 
-    lines.append(r"\section{Executive Summary}")
+    lines.append(r"\section*{Executive Summary}")
+    lines.append(r"\addcontentsline{toc}{section}{Executive Summary}")
     add_summary(
         [
             f"{len(hits)} current leaf certificates are in scope on this run.",
@@ -461,7 +486,8 @@ def render_latex(args: argparse.Namespace, report: dict[str, object]) -> None:
         r"This document is designed as a complete publication rather than a brief. The main chapters carry the argument and the appendices carry the detailed evidence."
     )
 
-    lines.append(r"\section{Reading Guide}")
+    lines.append(r"\section*{Reading Guide}")
+    lines.append(r"\addcontentsline{toc}{section}{Reading Guide}")
     add_summary(
         [
             "Chapter 1 proves the corpus and explains why the numbers can be trusted.",
@@ -524,8 +550,14 @@ def render_latex(args: argparse.Namespace, report: dict[str, object]) -> None:
     lines.append(
         r"Extended Key Usage tells software what a certificate is allowed to do. In plain terms, this is the difference between a website certificate, a client-identity certificate, an email certificate, and a code-signing certificate."
     )
+    dual_issuer_counts = Counter(short_issuer(item.issuer_name) for item in dual_items)
     lines.extend(
         [
+            r"\subsection{What Dual EKU Means}",
+            rf"In this corpus, {purpose_summary.category_counts.get('tls_server_and_client', 0)} certificates carry both \texttt{{serverAuth}} and \texttt{{clientAuth}} in Extended Key Usage. That means the certificate is \emph{{allowed}} to be used in either role. It does not prove that the certificate is actually being used as a client identity in production.",
+            rf"The dual-EKU bucket is concentrated in these issuer families: {latex_escape(', '.join(f'{name} ({count})' for name, count in dual_issuer_counts.most_common()))}.",
+            rf"{len(purpose_summary.dual_eku_subject_cns_with_server_only_sibling)} dual-EKU Subject-CN families also have a strict server-only sibling, while {len(purpose_summary.dual_eku_subject_cns_without_server_only_sibling)} currently appear only in the dual-EKU bucket.",
+            r"The important interpretation point is that these still look like public hostname certificates: DNS-style Subject CN values, DNS SAN lists, and public WebPKI issuers. The better reading is therefore not ``separate client-certificate estate'', but ``server certificates issued from a template that also allowed clientAuth''.",
             r"\subsection{Dual-EKU Catalogue}",
             r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.38\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth}}",
             r"\toprule",
