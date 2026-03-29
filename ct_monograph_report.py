@@ -193,6 +193,41 @@ def historical_repeated_cn_count(assessment: ct_lineage_report.HistoricalAssessm
     return sum(1 for values in assessment.cn_groups.values() if len(values) > 1)
 
 
+def truncate_text(value: str, limit: int = 88) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3].rstrip() + "..."
+
+
+def first_list_item(value: str) -> str:
+    return value.split(", ")[0] if value else "-"
+
+
+def compact_list_items(value: str, keep: int = 2, limit: int = 96) -> str:
+    if not value:
+        return "-"
+    parts = value.split(", ")
+    if len(parts) <= keep:
+        return truncate_text(value, limit)
+    return truncate_text(", ".join(parts[:keep]) + f", ... (+{len(parts) - keep} more)", limit)
+
+
+def nonzero_purpose_rows(purpose_rows: list[list[str]]) -> list[list[str]]:
+    return [row for row in purpose_rows if row[1] != "0"]
+
+
+def driver_summary(subjects: str, issuers: str) -> str:
+    return f"{truncate_text(first_list_item(subjects), 48)}; {truncate_text(first_list_item(issuers), 28)}"
+
+
+def overlap_signal(details: str) -> str:
+    parts = []
+    for piece in details.split("; "):
+        if piece.startswith("DN=") or piece.startswith("SANs="):
+            parts.append(piece)
+    return truncate_text("; ".join(parts) if parts else details, 108)
+
+
 def render_markdown(
     args: argparse.Namespace,
     report: dict[str, object],
@@ -231,6 +266,7 @@ def render_markdown(
             ("no_eku", purpose_summary.category_counts.get("no_eku", 0)),
         ]
     ]
+    visible_purpose_rows = nonzero_purpose_rows(purpose_rows)
     eku_template_rows = [
         [template, str(count), pct(count, total_certificates)]
         for template, count in purpose_summary.eku_templates.items()
@@ -253,10 +289,9 @@ def render_markdown(
         [
             row["group_id"],
             row["basis"],
-            row["type"],
             row["certificates"],
             row["subjects"],
-            row["top_stacks"],
+            first_list_item(row["top_stacks"]),
         ]
         for row in report["group_digest"]
     ]
@@ -340,13 +375,13 @@ def render_markdown(
     lines.append("")
     lines.append("### Issuer Trust Table")
     lines.append("")
-    lines.extend(md_table(["Issuer Family", "Certificates", "Variants", "Major WebPKI", "Issuer Variants Seen"], issuer_rows))
+    lines.extend(md_table(["Issuer Family", "Certificates", "Variants", "Major WebPKI"], [row[:4] for row in issuer_rows]))
     lines.append("")
     lines.append("**What WebPKI trust means**")
     lines.append("")
     lines.append("A WebPKI-trusted issuer is a certificate authority trusted by mainstream browser and operating-system trust stores for public TLS. That matters because it tells you these certificates are not part of a private PKI hidden inside one organisation. They are intended to be valid in the public Internet trust model.")
     lines.append("")
-    lines.append("This table is intentionally collapsed to issuer families. The detailed issuer variant names remain visible in the appendix inventory, where the reader needs them for forensic precision rather than quick orientation.")
+    lines.append("This view should answer one question only: how many trust lineages are present in the estate. The exact subordinate issuer names are supporting evidence, so they stay in the appendix inventory rather than cluttering the main chapter.")
     lines.append("")
     lines.append("## Chapter 3: Intended Purpose of the Certificates")
     lines.append("")
@@ -366,7 +401,9 @@ def render_markdown(
     lines.append("")
     lines.append("### Purpose Map")
     lines.append("")
-    lines.extend(md_table(["Usage Class", "Certificates", "Share", "Meaning"], purpose_rows))
+    lines.extend(md_table(["Usage Class", "Certificates", "Share", "Meaning"], visible_purpose_rows))
+    lines.append("")
+    lines.append("This view should answer only what kind of certificates these are. Zero-count categories are deliberately removed here because they add noise without changing the conclusion.")
     lines.append("")
     lines.append("The basic picture is simple: the corpus is overwhelmingly made of ordinary public TLS server certificates, with a smaller minority whose EKU also permits client-certificate use.")
     lines.append("")
@@ -458,15 +495,13 @@ def render_markdown(
     if assessment.current_red_flag_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Score", "Certs", "Current", "Flags", "Issuer Mix"],
+                ["Subject CN", "Live Certs", "Current Concern", "Why It Lands On This List"],
                 [
                     [
                         row.subject_cn,
-                        str(row.score),
-                        str(row.certificate_count),
                         str(row.current_certificate_count),
                         row.flags,
-                        row.notes,
+                        truncate_text(row.notes, 72),
                     ]
                     for row in assessment.current_red_flag_rows[:25]
                 ],
@@ -480,15 +515,13 @@ def render_markdown(
     if assessment.past_red_flag_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Score", "Certs", "Current", "Flags", "Issuer Mix"],
+                ["Subject CN", "Historic Certs", "Historical Concern", "Why It Mattered"],
                 [
                     [
                         row.subject_cn,
-                        str(row.score),
                         str(row.certificate_count),
-                        str(row.current_certificate_count),
                         row.flags,
-                        row.notes,
+                        truncate_text(row.notes, 72),
                     ]
                     for row in assessment.past_red_flag_rows[:25]
                 ],
@@ -498,6 +531,8 @@ def render_markdown(
         lines.append("No past-only red flags were found under the configured rules.")
     lines.append("")
     lines.append("### What The Historical Red Flags Mean")
+    lines.append("")
+    lines.append("The two short tables above are triage views. They are meant to answer which names deserve attention now, and which names used to be problematic but no longer look live. The appendices below keep the narrower evidence tables that explain why each name is there.")
     lines.append("")
     lines.extend(
         [
@@ -604,26 +639,26 @@ def render_markdown(
     lines.append("")
     lines.append("## Appendix A: Full Family Catalogue")
     lines.append("")
-    lines.extend(md_table(["ID", "Basis", "Type", "Certs", "CNs", "Top Stacks"], family_rows))
+    lines.append("This appendix is a compact family map. It is not the place for full per-certificate evidence; that remains in the detailed inventory appendix at the end.")
+    lines.append("")
+    lines.extend(md_table(["ID", "Basis", "Certs", "CNs", "Dominant Stack"], family_rows))
     lines.append("")
     lines.append("## Appendix B: Historical Red-Flag Detail")
     lines.append("")
-    lines.append("This appendix keeps the detailed historical evidence inside the monograph so that the reader does not need a second report.")
+    lines.append("This appendix keeps the detailed historical evidence inside the monograph so that the reader does not need a second report. Each subsection answers one narrow question. If a column does not help answer that question, it has been removed.")
     lines.append("")
     lines.append("### B.1 Current Red-Flag Inventory")
     lines.append("")
     if assessment.current_red_flag_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Score", "Certs", "Current", "Flags", "Issuer Mix"],
+                ["Subject CN", "Live Certs", "Current Concern", "Supporting Context"],
                 [
                     [
                         row.subject_cn,
-                        str(row.score),
-                        str(row.certificate_count),
                         str(row.current_certificate_count),
                         row.flags,
-                        row.notes,
+                        truncate_text(row.notes, 84),
                     ]
                     for row in assessment.current_red_flag_rows
                 ],
@@ -637,15 +672,13 @@ def render_markdown(
     if assessment.past_red_flag_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Score", "Certs", "Current", "Flags", "Issuer Mix"],
+                ["Subject CN", "Historic Certs", "Historical Concern", "Supporting Context"],
                 [
                     [
                         row.subject_cn,
-                        str(row.score),
                         str(row.certificate_count),
-                        str(row.current_certificate_count),
                         row.flags,
-                        row.notes,
+                        truncate_text(row.notes, 84),
                     ]
                     for row in assessment.past_red_flag_rows
                 ],
@@ -659,17 +692,13 @@ def render_markdown(
     if assessment.overlap_current_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Lineage", "Asset Certs", "Current", "Max Concurrent", "Max Overlap Days", "Class", "Asset Details"],
+                ["Subject CN", "Max Overlap Days", "Live Certs", "Renewal Asset Signal"],
                 [
                     [
                         row.subject_cn,
-                        row.lineage,
-                        str(row.asset_variant_count),
-                        str(row.current_certificate_count),
-                        str(row.max_concurrent),
                         str(row.max_overlap_days),
-                        row.overlap_class,
-                        row.details,
+                        str(row.current_certificate_count),
+                        f"{row.lineage}; {overlap_signal(row.details)}",
                     ]
                     for row in assessment.overlap_current_rows
                 ],
@@ -683,17 +712,13 @@ def render_markdown(
     if assessment.overlap_past_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Lineage", "Asset Certs", "Current", "Max Concurrent", "Max Overlap Days", "Class", "Asset Details"],
+                ["Subject CN", "Max Overlap Days", "Historic Certs", "Renewal Asset Signal"],
                 [
                     [
                         row.subject_cn,
-                        row.lineage,
-                        str(row.asset_variant_count),
-                        str(row.current_certificate_count),
-                        str(row.max_concurrent),
                         str(row.max_overlap_days),
-                        row.overlap_class,
-                        row.details,
+                        str(row.asset_variant_count),
+                        f"{row.lineage}; {overlap_signal(row.details)}",
                     ]
                     for row in assessment.overlap_past_rows
                 ],
@@ -707,15 +732,13 @@ def render_markdown(
     if assessment.dn_current_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Certs", "Current", "Distinct Subject DNs", "Issuer Families", "Subject DN Samples"],
+                ["Subject CN", "Distinct Subject DNs", "Live Certs", "Subject DN Samples"],
                 [
                     [
                         row.subject_cn,
-                        str(row.certificate_count),
-                        str(row.current_certificate_count),
                         str(row.distinct_value_count),
-                        row.issuer_families,
-                        row.details,
+                        str(row.current_certificate_count),
+                        truncate_text(row.details, 92),
                     ]
                     for row in assessment.dn_current_rows
                 ],
@@ -729,15 +752,13 @@ def render_markdown(
     if assessment.dn_past_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Certs", "Current", "Distinct Subject DNs", "Issuer Families", "Subject DN Samples"],
+                ["Subject CN", "Distinct Subject DNs", "Historic Certs", "Subject DN Samples"],
                 [
                     [
                         row.subject_cn,
-                        str(row.certificate_count),
-                        str(row.current_certificate_count),
                         str(row.distinct_value_count),
-                        row.issuer_families,
-                        row.details,
+                        str(row.certificate_count),
+                        truncate_text(row.details, 92),
                     ]
                     for row in assessment.dn_past_rows
                 ],
@@ -751,15 +772,13 @@ def render_markdown(
     if assessment.vendor_current_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Certs", "Current", "Distinct Lineages", "Lineage Mix", "Lineages Seen"],
+                ["Subject CN", "Distinct Lineages", "Live Certs", "Lineages Seen"],
                 [
                     [
                         row.subject_cn,
-                        str(row.certificate_count),
-                        str(row.current_certificate_count),
                         str(row.distinct_value_count),
-                        row.issuer_families,
-                        row.details,
+                        str(row.current_certificate_count),
+                        truncate_text(row.details, 92),
                     ]
                     for row in assessment.vendor_current_rows
                 ],
@@ -773,15 +792,13 @@ def render_markdown(
     if assessment.vendor_past_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Certs", "Current", "Distinct Lineages", "Lineage Mix", "Lineages Seen"],
+                ["Subject CN", "Distinct Lineages", "Historic Certs", "Lineages Seen"],
                 [
                     [
                         row.subject_cn,
-                        str(row.certificate_count),
-                        str(row.current_certificate_count),
                         str(row.distinct_value_count),
-                        row.issuer_families,
-                        row.details,
+                        str(row.certificate_count),
+                        truncate_text(row.details, 92),
                     ]
                     for row in assessment.vendor_past_rows
                 ],
@@ -795,17 +812,14 @@ def render_markdown(
     if assessment.san_current_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Certs", "Current", "SAN Profiles", "Stable SANs", "Variable SANs", "Delta Pattern", "Representative Delta"],
+                ["Subject CN", "SAN Profiles", "Live Certs", "Delta Pattern", "Representative Delta"],
                 [
                     [
                         row.subject_cn,
-                        str(row.certificate_count),
-                        str(row.current_certificate_count),
                         str(row.distinct_san_profiles),
-                        str(row.stable_entries),
-                        str(row.variable_entries),
+                        str(row.current_certificate_count),
                         row.delta_pattern,
-                        row.representative_delta,
+                        truncate_text(row.representative_delta, 92),
                     ]
                     for row in assessment.san_current_rows
                 ],
@@ -819,17 +833,14 @@ def render_markdown(
     if assessment.san_past_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Certs", "Current", "SAN Profiles", "Stable SANs", "Variable SANs", "Delta Pattern", "Representative Delta"],
+                ["Subject CN", "SAN Profiles", "Historic Certs", "Delta Pattern", "Representative Delta"],
                 [
                     [
                         row.subject_cn,
-                        str(row.certificate_count),
-                        str(row.current_certificate_count),
                         str(row.distinct_san_profiles),
-                        str(row.stable_entries),
-                        str(row.variable_entries),
+                        str(row.certificate_count),
                         row.delta_pattern,
-                        row.representative_delta,
+                        truncate_text(row.representative_delta, 92),
                     ]
                     for row in assessment.san_past_rows
                 ],
@@ -842,8 +853,8 @@ def render_markdown(
     lines.append("")
     lines.extend(
         md_table(
-            ["Start Day", "Certificates", "Top Subject CNs", "Top Issuer Families"],
-            [[row.start_day, str(row.certificate_count), row.top_subjects, row.top_issuers] for row in assessment.day_rows],
+            ["Start Day", "Certificates", "Dominant Driver"],
+            [[row.start_day, str(row.certificate_count), driver_summary(row.top_subjects, row.top_issuers)] for row in assessment.day_rows],
         )
     )
     lines.append("")
@@ -852,14 +863,13 @@ def render_markdown(
     if assessment.week_rows:
         lines.extend(
             md_table(
-                ["Week Start", "Certificates", "Prior 8-Week Avg", "Top Subject CNs", "Top Issuer Families"],
+                ["Week Start", "Certificates", "Prior 8-Week Avg", "Dominant Driver"],
                 [
                     [
                         row.week_start,
                         str(row.certificate_count),
                         row.prior_eight_week_avg,
-                        row.top_subjects,
-                        row.top_issuers,
+                        driver_summary(row.top_subjects, row.top_issuers),
                     ]
                     for row in assessment.week_rows
                 ],
@@ -915,6 +925,7 @@ def render_latex(
             ("no_eku", purpose_summary.category_counts.get("no_eku", 0)),
         ]
     ]
+    visible_purpose_rows = [(label, count, share, meaning) for label, count, share, meaning in purpose_rows if count != "0"]
     appendix_pdf_path = args.appendix_pdf_output.resolve().as_posix()
     lines: list[str] = [
         r"\documentclass[11pt]{article}",
@@ -932,7 +943,6 @@ def render_latex(
         r"\usepackage{fancyhdr}",
         r"\usepackage{titlesec}",
         r"\usepackage[most]{tcolorbox}",
-        r"\usepackage{pdflscape}",
         r"\usepackage{pdfpages}",
         r"\defaultfontfeatures{Ligatures=TeX,Scale=MatchLowercase}",
         r"\setmainfont{Palatino}",
@@ -1042,19 +1052,19 @@ def render_latex(
     lines.extend(
         [
             r"\subsection{Issuer Trust Table}",
-            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedleft\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.39\linewidth}}",
+            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.40\linewidth} >{\raggedleft\arraybackslash}p{0.12\linewidth} >{\raggedleft\arraybackslash}p{0.12\linewidth} >{\raggedleft\arraybackslash}p{0.18\linewidth}}",
             r"\toprule",
-            r"Issuer Family & Certs & Variants & Major WebPKI & Issuer Variants Seen \\",
+            r"Issuer Family & Certs & Variants & Major WebPKI \\",
             r"\midrule",
         ]
     )
     for row in issuer_family_rows:
         lines.append(
-            rf"{latex_escape(row['family'])} & {row['certificates']} & {row['variant_count']} & {row['major_webpki']} & {latex_escape(row['variants'])} \\"
+            rf"{latex_escape(row['family'])} & {row['certificates']} & {row['variant_count']} & {row['major_webpki']} \\"
         )
     lines.extend([r"\bottomrule", r"\end{longtable}"])
     lines.append(
-        r"This table is intentionally collapsed to issuer families for readability. The appendix inventory keeps the exact issuer variant names for forensic review."
+        r"This view should answer one question only: how many trust lineages are present in the estate. Exact subordinate issuer names are supporting evidence and remain in the detailed inventory appendix."
     )
 
     lines.append(r"\section{Intended Purpose of the Certificates}")
@@ -1078,11 +1088,14 @@ def render_latex(
             r"\midrule",
         ]
     )
-    for label, count, share, meaning in purpose_rows:
+    for label, count, share, meaning in visible_purpose_rows:
         lines.append(
             rf"{latex_escape(label)} & {count} & {latex_escape(share)} & {latex_escape(meaning)} \\"
         )
     lines.extend([r"\bottomrule", r"\end{longtable}"])
+    lines.append(
+        r"This view should answer only what kind of certificates these are. Zero-count categories are removed here because they add noise without changing the conclusion."
+    )
     lines.append(
         r"The basic picture is simple: the corpus is overwhelmingly made of ordinary public TLS server certificates, with a smaller minority whose EKU also permits client-certificate use."
     )
@@ -1156,15 +1169,15 @@ def render_latex(
     if assessment.current_red_flag_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedright\arraybackslash}p{0.26\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedright\arraybackslash}p{0.29\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Score & Certs & Current & Flags & Issuer Mix \\",
+                r"Subject CN & Live Certs & Current Concern & Why It Lands On This List \\",
                 r"\midrule",
             ]
         )
         for row in assessment.current_red_flag_rows[:25]:
             lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.score} & {row.certificate_count} & {row.current_certificate_count} & {latex_escape(row.flags)} & {latex_escape(row.notes)} \\"
+                rf"{latex_escape(row.subject_cn)} & {row.current_certificate_count} & {latex_escape(row.flags)} & {latex_escape(truncate_text(row.notes, 72))} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1173,15 +1186,15 @@ def render_latex(
     if assessment.past_red_flag_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedright\arraybackslash}p{0.26\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedright\arraybackslash}p{0.29\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Score & Certs & Current & Flags & Issuer Mix \\",
+                r"Subject CN & Historic Certs & Historical Concern & Why It Mattered \\",
                 r"\midrule",
             ]
         )
         for row in assessment.past_red_flag_rows[:25]:
             lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.score} & {row.certificate_count} & {row.current_certificate_count} & {latex_escape(row.flags)} & {latex_escape(row.notes)} \\"
+                rf"{latex_escape(row.subject_cn)} & {row.certificate_count} & {latex_escape(row.flags)} & {latex_escape(truncate_text(row.notes, 72))} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1189,6 +1202,7 @@ def render_latex(
     lines.extend(
         [
             r"\subsection{What The Historical Red Flags Mean}",
+            r"The two short tables above are triage views. They answer which names deserve attention now and which names used to be problematic but no longer look live. The appendix below keeps the narrower evidence tables that explain why each name appears here.",
             rf"Overlap red flags mean predecessor and successor certificates inside the same renewal asset lineage coexist for fifty days or more. Current cases: {len(assessment.overlap_current_rows)}. Past-only fixed cases: {len(assessment.overlap_past_rows)}.",
             rf"Subject-DN drift means the same Subject CN appears under more than one full Subject DN. Current cases: {len(assessment.dn_current_rows)}. Past-only fixed cases: {len(assessment.dn_past_rows)}.",
             rf"CA-lineage drift means the same Subject CN appears under more than one CA lineage after collapsing COMODO and Sectigo together. Current cases: {len(assessment.vendor_current_rows)}. Past-only fixed cases: {len(assessment.vendor_past_rows)}.",
@@ -1283,39 +1297,38 @@ def render_latex(
         [
             r"\appendix",
             r"\section{Full Family Catalogue}",
-            r"\begin{landscape}",
-            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.38\linewidth} >{\raggedright\arraybackslash}p{0.15\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.15\linewidth}}",
+            r"This appendix is a compact family map. It is not the place for full per-certificate evidence; that remains in the detailed inventory appendix at the end of the monograph.",
+            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.48\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth}}",
             r"\toprule",
-            r"ID & Basis & Type & Certs & CNs & Top Stacks \\",
+            r"ID & Basis & Certs & CNs & Dominant Stack \\",
             r"\midrule",
         ]
     )
     for row in report["group_digest"]:
         lines.append(
-            rf"{latex_escape(row['group_id'])} & {latex_escape(row['basis'])} & {latex_escape(row['type'])} & {row['certificates']} & {row['subjects']} & {latex_escape(row['top_stacks'])} \\"
+            rf"{latex_escape(row['group_id'])} & {latex_escape(row['basis'])} & {row['certificates']} & {row['subjects']} & {latex_escape(first_list_item(row['top_stacks']))} \\"
         )
-    lines.extend([r"\bottomrule", r"\end{longtable}", r"\end{landscape}"])
+    lines.extend([r"\bottomrule", r"\end{longtable}"])
 
     lines.extend(
         [
             r"\section{Historical Red-Flag Detail}",
-            r"This appendix keeps the detailed historical evidence inside the monograph so that the reader does not need a second report.",
-            r"\begin{landscape}",
+            r"This appendix keeps the detailed historical evidence inside the monograph so that the reader does not need a second report. Each subsection answers one narrow question. If a column does not help answer that question, it has been removed.",
             r"\subsection{Current Red-Flag Inventory}",
         ]
     )
     if assessment.current_red_flag_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedright\arraybackslash}p{0.26\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.29\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.25\linewidth} >{\raggedright\arraybackslash}p{0.26\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Score & Certs & Current & Flags & Issuer Mix \\",
+                r"Subject CN & Live Certs & Current Concern & Supporting Context \\",
                 r"\midrule",
             ]
         )
         for row in assessment.current_red_flag_rows:
             lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.score} & {row.certificate_count} & {row.current_certificate_count} & {latex_escape(row.flags)} & {latex_escape(row.notes)} \\"
+                rf"{latex_escape(row.subject_cn)} & {row.current_certificate_count} & {latex_escape(row.flags)} & {latex_escape(truncate_text(row.notes, 84))} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1324,15 +1337,15 @@ def render_latex(
     if assessment.past_red_flag_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedright\arraybackslash}p{0.26\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.29\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.25\linewidth} >{\raggedright\arraybackslash}p{0.26\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Score & Certs & Current & Flags & Issuer Mix \\",
+                r"Subject CN & Historic Certs & Historical Concern & Supporting Context \\",
                 r"\midrule",
             ]
         )
         for row in assessment.past_red_flag_rows:
             lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.score} & {row.certificate_count} & {row.current_certificate_count} & {latex_escape(row.flags)} & {latex_escape(row.notes)} \\"
+                rf"{latex_escape(row.subject_cn)} & {row.certificate_count} & {latex_escape(row.flags)} & {latex_escape(truncate_text(row.notes, 84))} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1341,15 +1354,15 @@ def render_latex(
     if assessment.overlap_current_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.14\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.13\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.48\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Lineage & Asset Certs & Current & Max Concurrent & Max Overlap Days & Class & Asset Details \\",
+                r"Subject CN & Max Overlap Days & Live Certs & Renewal Asset Signal \\",
                 r"\midrule",
             ]
         )
         for row in assessment.overlap_current_rows:
             lines.append(
-                rf"{latex_escape(row.subject_cn)} & {latex_escape(row.lineage)} & {row.asset_variant_count} & {row.current_certificate_count} & {row.max_concurrent} & {row.max_overlap_days} & {latex_escape(row.overlap_class)} & {latex_escape(row.details)} \\"
+                rf"{latex_escape(row.subject_cn)} & {row.max_overlap_days} & {row.current_certificate_count} & {latex_escape(f'{row.lineage}; {overlap_signal(row.details)}')} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1358,15 +1371,15 @@ def render_latex(
     if assessment.overlap_past_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.14\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.13\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.47\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Lineage & Asset Certs & Current & Max Concurrent & Max Overlap Days & Class & Asset Details \\",
+                r"Subject CN & Max Overlap Days & Historic Certs & Renewal Asset Signal \\",
                 r"\midrule",
             ]
         )
         for row in assessment.overlap_past_rows:
             lines.append(
-                rf"{latex_escape(row.subject_cn)} & {latex_escape(row.lineage)} & {row.asset_variant_count} & {row.current_certificate_count} & {row.max_concurrent} & {row.max_overlap_days} & {latex_escape(row.overlap_class)} & {latex_escape(row.details)} \\"
+                rf"{latex_escape(row.subject_cn)} & {row.max_overlap_days} & {row.asset_variant_count} & {latex_escape(f'{row.lineage}; {overlap_signal(row.details)}')} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1375,15 +1388,15 @@ def render_latex(
     if assessment.dn_current_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedright\arraybackslash}p{0.29\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.26\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.43\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Certs & Current & Distinct Subject DNs & Issuer Families & Subject DN Samples \\",
+                r"Subject CN & Distinct Subject DNs & Live Certs & Subject DN Samples \\",
                 r"\midrule",
             ]
         )
         for row in assessment.dn_current_rows:
             lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_value_count} & {latex_escape(row.issuer_families)} & {latex_escape(row.details)} \\"
+                rf"{latex_escape(row.subject_cn)} & {row.distinct_value_count} & {row.current_certificate_count} & {latex_escape(truncate_text(row.details, 92))} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1392,15 +1405,15 @@ def render_latex(
     if assessment.dn_past_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedright\arraybackslash}p{0.29\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.26\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedright\arraybackslash}p{0.41\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Certs & Current & Distinct Subject DNs & Issuer Families & Subject DN Samples \\",
+                r"Subject CN & Distinct Subject DNs & Historic Certs & Subject DN Samples \\",
                 r"\midrule",
             ]
         )
         for row in assessment.dn_past_rows:
             lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_value_count} & {latex_escape(row.issuer_families)} & {latex_escape(row.details)} \\"
+                rf"{latex_escape(row.subject_cn)} & {row.distinct_value_count} & {row.certificate_count} & {latex_escape(truncate_text(row.details, 92))} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1409,15 +1422,15 @@ def render_latex(
     if assessment.vendor_current_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.32\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.42\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Certs & Current & Distinct Lineages & Lineage Mix & Lineages Seen \\",
+                r"Subject CN & Distinct Lineages & Live Certs & Lineages Seen \\",
                 r"\midrule",
             ]
         )
         for row in assessment.vendor_current_rows:
             lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_value_count} & {latex_escape(row.issuer_families)} & {latex_escape(row.details)} \\"
+                rf"{latex_escape(row.subject_cn)} & {row.distinct_value_count} & {row.current_certificate_count} & {latex_escape(truncate_text(row.details, 92))} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1426,15 +1439,15 @@ def render_latex(
     if assessment.vendor_past_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.32\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedright\arraybackslash}p{0.40\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Certs & Current & Distinct Lineages & Lineage Mix & Lineages Seen \\",
+                r"Subject CN & Distinct Lineages & Historic Certs & Lineages Seen \\",
                 r"\midrule",
             ]
         )
         for row in assessment.vendor_past_rows:
             lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_value_count} & {latex_escape(row.issuer_families)} & {latex_escape(row.details)} \\"
+                rf"{latex_escape(row.subject_cn)} & {row.distinct_value_count} & {row.certificate_count} & {latex_escape(truncate_text(row.details, 92))} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1443,15 +1456,15 @@ def render_latex(
     if assessment.san_current_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.25\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.32\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Certs & Current & Profiles & Stable & Variable & Delta Pattern & Representative Delta \\",
+                r"Subject CN & Profiles & Live Certs & Delta Pattern & Representative Delta \\",
                 r"\midrule",
             ]
         )
         for row in assessment.san_current_rows:
             lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_san_profiles} & {row.stable_entries} & {row.variable_entries} & {latex_escape(row.delta_pattern)} & {latex_escape(row.representative_delta)} \\"
+                rf"{latex_escape(row.subject_cn)} & {row.distinct_san_profiles} & {row.current_certificate_count} & {latex_escape(row.delta_pattern)} & {latex_escape(truncate_text(row.representative_delta, 92))} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1460,15 +1473,15 @@ def render_latex(
     if assessment.san_past_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.25\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.30\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Certs & Current & Profiles & Stable & Variable & Delta Pattern & Representative Delta \\",
+                r"Subject CN & Profiles & Historic Certs & Delta Pattern & Representative Delta \\",
                 r"\midrule",
             ]
         )
         for row in assessment.san_past_rows:
             lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_san_profiles} & {row.stable_entries} & {row.variable_entries} & {latex_escape(row.delta_pattern)} & {latex_escape(row.representative_delta)} \\"
+                rf"{latex_escape(row.subject_cn)} & {row.distinct_san_profiles} & {row.certificate_count} & {latex_escape(row.delta_pattern)} & {latex_escape(truncate_text(row.representative_delta, 92))} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1476,30 +1489,30 @@ def render_latex(
     lines.append(r"\subsection{Historic Start Dates}")
     lines.extend(
         [
-            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.13\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.43\linewidth} >{\raggedright\arraybackslash}p{0.27\linewidth}}",
+            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.62\linewidth}}",
             r"\toprule",
-            r"Start Day & Certificates & Top Subject CNs & Top Issuer Families \\",
+            r"Start Day & Certificates & Dominant Driver \\",
             r"\midrule",
         ]
     )
     for row in assessment.day_rows:
         lines.append(
-            rf"{latex_escape(row.start_day)} & {row.certificate_count} & {latex_escape(row.top_subjects)} & {latex_escape(row.top_issuers)} \\"
+            rf"{latex_escape(row.start_day)} & {row.certificate_count} & {latex_escape(driver_summary(row.top_subjects, row.top_issuers))} \\"
         )
     lines.extend([r"\bottomrule", r"\end{longtable}"])
     lines.append(r"\subsection{Historic Step Weeks}")
     if assessment.week_rows:
         lines.extend(
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.13\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.35\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth}}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedleft\arraybackslash}p{0.13\linewidth} >{\raggedright\arraybackslash}p{0.52\linewidth}}",
                 r"\toprule",
-                r"Week Start & Certs & Prior 8-Week Avg & Top Subject CNs & Top Issuer Families \\",
+                r"Week Start & Certs & Prior 8-Week Avg & Dominant Driver \\",
                 r"\midrule",
             ]
         )
         for row in assessment.week_rows:
             lines.append(
-                rf"{latex_escape(row.week_start)} & {row.certificate_count} & {latex_escape(row.prior_eight_week_avg)} & {latex_escape(row.top_subjects)} & {latex_escape(row.top_issuers)} \\"
+                rf"{latex_escape(row.week_start)} & {row.certificate_count} & {latex_escape(row.prior_eight_week_avg)} & {latex_escape(driver_summary(row.top_subjects, row.top_issuers))} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
@@ -1507,7 +1520,6 @@ def render_latex(
 
     lines.extend(
         [
-            r"\end{landscape}",
             r"\section{Detailed Inventory Appendix}",
             r"This appendix reproduces the full issuer-first family inventory so that the publication remains complete rather than merely interpretive.",
             rf"\includepdf[pages=-,pagecommand={{}}]{{{latex_escape(appendix_pdf_path)}}}",
