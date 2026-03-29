@@ -60,9 +60,6 @@ monograph:
 		--max-candidates-per-domain $(MAX_CANDIDATES) \
 		--markdown-output output/corpus/monograph.md \
 		--latex-output output/corpus/monograph.tex \
-		--pdf-output output/corpus/monograph.pdf \
-		--appendix-markdown-output output/corpus/appendix-inventory.md \
-		--appendix-latex-output output/corpus/appendix-inventory.tex \
-		--appendix-pdf-output output/corpus/appendix-inventory.pdf
+		--pdf-output output/corpus/monograph.pdf
 
-all: init-config purpose lineage monograph
+all: init-config monograph

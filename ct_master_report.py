@@ -131,10 +131,8 @@ def short_issuer_family(issuer_name: str) -> str:
     lowered = issuer_name.lower()
     if "amazon" in lowered:
         return "Amazon"
-    if "sectigo" in lowered:
-        return "Sectigo"
-    if "comodo" in lowered:
-        return "COMODO"
+    if "sectigo" in lowered or "comodo" in lowered:
+        return "Sectigo/COMODO"
     if "google trust services" in lowered or "cn=we1" in lowered:
         return "Google Trust Services"
     return "Other"

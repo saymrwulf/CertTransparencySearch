@@ -190,6 +190,32 @@ class RedFlagRow:
     notes: str
 
 
+@dataclass
+class HistoricalAssessment:
+    domains: list[str]
+    certificates: list[HistoricalCertificate]
+    cn_groups: dict[str, list[HistoricalCertificate]]
+    dn_rows: list[CnCollisionRow]
+    dn_current_rows: list[CnCollisionRow]
+    dn_past_rows: list[CnCollisionRow]
+    issuer_rows: list[CnCollisionRow]
+    vendor_rows: list[CnCollisionRow]
+    vendor_current_rows: list[CnCollisionRow]
+    vendor_past_rows: list[CnCollisionRow]
+    san_rows: list[SanChangeRow]
+    san_current_rows: list[SanChangeRow]
+    san_past_rows: list[SanChangeRow]
+    san_pattern_counts: Counter[str]
+    overlap_current_rows: list[OverlapRow]
+    overlap_past_rows: list[OverlapRow]
+    normal_reissuance_assets: int
+    repeated_asset_count: int
+    current_red_flag_rows: list[RedFlagRow]
+    past_red_flag_rows: list[RedFlagRow]
+    day_rows: list[StartDayRow]
+    week_rows: list[StepWeekRow]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Analyse historical certificate lineage, CN reuse, issuer drift, SAN drift, and issuance bursts."
@@ -530,11 +556,9 @@ def overlap_days(left: HistoricalCertificate, right: HistoricalCertificate) -> i
 def overlap_class(days: int) -> str:
     if days <= 0:
         return "no overlap"
-    if days <= 14:
-        return "brief rollover"
-    if days <= 45:
-        return "elevated overlap"
-    return "extended overlap"
+    if days < 50:
+        return "normal rollover"
+    return "red flag (>=50 days)"
 
 
 def build_asset_key(certificate: HistoricalCertificate) -> tuple[str, str, tuple[str, ...], str]:
@@ -546,10 +570,67 @@ def build_asset_key(certificate: HistoricalCertificate) -> tuple[str, str, tuple
     )
 
 
-def overlap_rows(cn_groups: dict[str, list[HistoricalCertificate]]) -> tuple[list[OverlapRow], list[OverlapRow]]:
+def overlap_metrics(certificates: list[HistoricalCertificate]) -> tuple[int, int]:
+    if len(certificates) < 2:
+        return (0, max(1, len(certificates)))
+    ordered = sorted(
+        certificates,
+        key=lambda item: (
+            item.validity_not_before,
+            item.effective_not_after,
+            item.fingerprint_sha256,
+        ),
+    )
+    max_overlap = 0
+    max_concurrent = 1
+    active: list[HistoricalCertificate] = []
+    for certificate in ordered:
+        active = [item for item in active if item.effective_not_after > certificate.validity_not_before]
+        for other in active:
+            max_overlap = max(max_overlap, overlap_days(other, certificate))
+        active.append(certificate)
+        max_concurrent = max(max_concurrent, len(active))
+    return (max_overlap, max_concurrent)
+
+
+def overlap_row_from_asset(
+    asset_certificates: list[HistoricalCertificate],
+    overlap_days_value: int,
+    max_concurrent: int,
+    details_prefix: str,
+) -> OverlapRow:
+    ordered = sorted(
+        asset_certificates,
+        key=lambda item: (
+            item.validity_not_before,
+            item.effective_not_after,
+            item.fingerprint_sha256,
+        ),
+    )
+    representative = ordered[0]
+    return OverlapRow(
+        subject_cn=representative.subject_cn,
+        asset_variant_count=len(ordered),
+        current_certificate_count=sum(1 for item in ordered if item.current),
+        lineage=representative.issuer_family,
+        max_concurrent=max_concurrent,
+        max_overlap_days=overlap_days_value,
+        overlap_class=overlap_class(overlap_days_value),
+        details=(
+            f"{details_prefix}; "
+            f"DN={representative.subject_dn}; "
+            f"SANs={len(representative.san_entries)}; "
+            f"windows={', '.join(f'{item.validity_not_before.date().isoformat()}->{item.effective_not_after.date().isoformat()}' for item in ordered[:4])}"
+            + ("" if len(ordered) <= 4 else f", ... (+{len(ordered) - 4} more)")
+        ),
+    )
+
+
+def overlap_rows(cn_groups: dict[str, list[HistoricalCertificate]]) -> tuple[list[OverlapRow], list[OverlapRow], int, int]:
     normal_reissuance = 0
-    elevated: list[OverlapRow] = []
-    extended: list[OverlapRow] = []
+    repeated_asset_count = 0
+    current_red_flags: list[OverlapRow] = []
+    past_red_flags: list[OverlapRow] = []
     for certificates in cn_groups.values():
         by_asset: dict[tuple[str, str, tuple[str, ...], str], list[HistoricalCertificate]] = defaultdict(list)
         for certificate in certificates:
@@ -557,48 +638,38 @@ def overlap_rows(cn_groups: dict[str, list[HistoricalCertificate]]) -> tuple[lis
         for asset_certificates in by_asset.values():
             if len(asset_certificates) < 2:
                 continue
-            ordered = sorted(
-                asset_certificates,
-                key=lambda item: (
-                    item.validity_not_before,
-                    item.effective_not_after,
-                    item.fingerprint_sha256,
-                ),
-            )
-            max_overlap = 0
-            max_concurrent = 1
-            active: list[HistoricalCertificate] = []
-            for certificate in ordered:
-                active = [item for item in active if item.effective_not_after > certificate.validity_not_before]
-                for other in active:
-                    max_overlap = max(max_overlap, overlap_days(other, certificate))
-                active.append(certificate)
-                max_concurrent = max(max_concurrent, len(active))
-            if max_overlap <= 14 and max_concurrent <= 2:
+            repeated_asset_count += 1
+            max_overlap, max_concurrent = overlap_metrics(asset_certificates)
+            current_certificates = [item for item in asset_certificates if item.current]
+            current_overlap, current_concurrent = overlap_metrics(current_certificates)
+            if max_overlap < 50:
                 normal_reissuance += 1
                 continue
-            representative = ordered[0]
-            row = OverlapRow(
-                subject_cn=representative.subject_cn,
-                asset_variant_count=len(ordered),
-                current_certificate_count=sum(1 for item in ordered if item.current),
-                lineage=representative.issuer_family,
-                max_concurrent=max_concurrent,
-                max_overlap_days=max_overlap,
-                overlap_class=overlap_class(max_overlap),
-                details=(
-                    f"DN={representative.subject_dn}; "
-                    f"SANs={len(representative.san_entries)}; "
-                    f"windows={', '.join(f'{item.validity_not_before.date().isoformat()}->{item.effective_not_after.date().isoformat()}' for item in ordered[:4])}"
-                    + ("" if len(ordered) <= 4 else f", ... (+{len(ordered) - 4} more)")
-                ),
+            if current_overlap >= 50:
+                current_red_flags.append(
+                    overlap_row_from_asset(
+                        current_certificates,
+                        current_overlap,
+                        current_concurrent,
+                        f"current overlap persists; historical max overlap={max_overlap} days",
+                    )
+                )
+                continue
+            past_red_flags.append(
+                overlap_row_from_asset(
+                    asset_certificates,
+                    max_overlap,
+                    max_concurrent,
+                    "historical overlap reached red-flag territory, but no currently valid pair still does",
+                )
             )
-            if max_overlap > 45 or max_concurrent > 2:
-                extended.append(row)
-            else:
-                elevated.append(row)
     ordering = lambda item: (-item.max_overlap_days, -item.max_concurrent, -item.asset_variant_count, item.subject_cn.casefold())
-    return (sorted(elevated, key=ordering), sorted(extended, key=ordering), normal_reissuance)
+    return (
+        sorted(current_red_flags, key=ordering),
+        sorted(past_red_flags, key=ordering),
+        normal_reissuance,
+        repeated_asset_count,
+    )
 
 
 def build_red_flag_rows(
@@ -606,21 +677,17 @@ def build_red_flag_rows(
     dn_rows: list[CnCollisionRow],
     vendor_rows: list[CnCollisionRow],
     san_rows: list[SanChangeRow],
-    overlap_extended_rows: list[OverlapRow],
-    overlap_elevated_rows: list[OverlapRow],
+    overlap_rows_: list[OverlapRow],
 ) -> list[RedFlagRow]:
     dn_set = {row.subject_cn.lower() for row in dn_rows}
     vendor_set = {row.subject_cn.lower() for row in vendor_rows}
     san_set = {row.subject_cn.lower() for row in san_rows}
-    extended_set = {row.subject_cn.lower() for row in overlap_extended_rows}
-    elevated_set = {row.subject_cn.lower() for row in overlap_elevated_rows}
+    overlap_set = {row.subject_cn.lower() for row in overlap_rows_}
     rows: list[RedFlagRow] = []
     for key, certificates in cn_groups.items():
         flags: list[str] = []
-        if key in extended_set:
-            flags.append("extended concurrent validity")
-        elif key in elevated_set:
-            flags.append("elevated overlap")
+        if key in overlap_set:
+            flags.append("overlap >=50 days")
         if key in dn_set:
             flags.append("Subject DN drift")
         if key in vendor_set:
@@ -629,20 +696,12 @@ def build_red_flag_rows(
             flags.append("SAN drift")
         if not flags:
             continue
-        score = 0
-        for flag in flags:
-            if flag == "extended concurrent validity":
-                score += 3
-            elif flag == "elevated overlap":
-                score += 1
-            else:
-                score += 1
         issuer_mix = Counter(item.issuer_family for item in certificates)
         notes = ", ".join(f"{name} ({count})" for name, count in issuer_mix.most_common())
         rows.append(
             RedFlagRow(
                 subject_cn=min({item.subject_cn for item in certificates}, key=str.casefold),
-                score=score,
+                score=len(flags),
                 certificate_count=len(certificates),
                 current_certificate_count=sum(1 for item in certificates if item.current),
                 flags=", ".join(flags),
@@ -706,28 +765,99 @@ def spike_weeks(certificates: list[HistoricalCertificate], min_count: int = 8) -
     return rows
 
 
-def render_markdown(
-    args: argparse.Namespace,
-    domains: list[str],
-    certificates: list[HistoricalCertificate],
-    dn_rows: list[CnCollisionRow],
-    issuer_rows: list[CnCollisionRow],
-    vendor_rows: list[CnCollisionRow],
-    san_rows: list[SanChangeRow],
-    san_pattern_counts: Counter[str],
-    overlap_elevated_rows: list[OverlapRow],
-    overlap_extended_rows: list[OverlapRow],
-    normal_reissuance_assets: int,
-    red_flag_rows: list[RedFlagRow],
-    day_rows: list[StartDayRow],
-    week_rows: list[StepWeekRow],
-) -> None:
-    args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
-    current_count = sum(1 for item in certificates if item.current)
+def partition_collision_rows(
+    rows: list[CnCollisionRow],
+    cn_groups: dict[str, list[HistoricalCertificate]],
+    value_getter,
+) -> tuple[list[CnCollisionRow], list[CnCollisionRow]]:
+    current_rows: list[CnCollisionRow] = []
+    past_rows: list[CnCollisionRow] = []
+    for row in rows:
+        certificates = cn_groups[row.subject_cn.lower()]
+        current_values = {value_getter(item) for item in certificates if item.current}
+        if len(current_values) > 1:
+            current_rows.append(row)
+        else:
+            past_rows.append(row)
+    return current_rows, past_rows
+
+
+def partition_san_rows(
+    rows: list[SanChangeRow],
+    cn_groups: dict[str, list[HistoricalCertificate]],
+) -> tuple[list[SanChangeRow], list[SanChangeRow]]:
+    current_rows: list[SanChangeRow] = []
+    past_rows: list[SanChangeRow] = []
+    for row in rows:
+        certificates = cn_groups[row.subject_cn.lower()]
+        current_profiles = {tuple(item.san_entries) for item in certificates if item.current}
+        if len(current_profiles) > 1:
+            current_rows.append(row)
+        else:
+            past_rows.append(row)
+    return current_rows, past_rows
+
+
+def build_assessment(args: argparse.Namespace) -> HistoricalAssessment:
+    domains, records = load_records(args)
+    certificates = build_certificates(records)
     cn_groups = group_by_subject_cn(certificates)
+    dn_rows = dn_change_rows(cn_groups)
+    issuer_rows, vendor_rows = issuer_change_rows(cn_groups)
+    san_rows, san_pattern_counts = san_change_rows(cn_groups)
+    overlap_current_rows, overlap_past_rows, normal_reissuance_assets, repeated_asset_count = overlap_rows(cn_groups)
+    dn_current_rows, dn_past_rows = partition_collision_rows(dn_rows, cn_groups, lambda item: item.subject_dn)
+    vendor_current_rows, vendor_past_rows = partition_collision_rows(vendor_rows, cn_groups, lambda item: item.issuer_family)
+    san_current_rows, san_past_rows = partition_san_rows(san_rows, cn_groups)
+    current_red_flag_rows = build_red_flag_rows(
+        cn_groups,
+        dn_current_rows,
+        vendor_current_rows,
+        san_current_rows,
+        overlap_current_rows,
+    )
+    past_red_flag_rows = build_red_flag_rows(
+        cn_groups,
+        dn_past_rows,
+        vendor_past_rows,
+        san_past_rows,
+        overlap_past_rows,
+    )
+    day_rows = top_start_days(certificates)
+    week_rows = spike_weeks(certificates)
+    return HistoricalAssessment(
+        domains=domains,
+        certificates=certificates,
+        cn_groups=cn_groups,
+        dn_rows=dn_rows,
+        dn_current_rows=dn_current_rows,
+        dn_past_rows=dn_past_rows,
+        issuer_rows=issuer_rows,
+        vendor_rows=vendor_rows,
+        vendor_current_rows=vendor_current_rows,
+        vendor_past_rows=vendor_past_rows,
+        san_rows=san_rows,
+        san_current_rows=san_current_rows,
+        san_past_rows=san_past_rows,
+        san_pattern_counts=san_pattern_counts,
+        overlap_current_rows=overlap_current_rows,
+        overlap_past_rows=overlap_past_rows,
+        normal_reissuance_assets=normal_reissuance_assets,
+        repeated_asset_count=repeated_asset_count,
+        current_red_flag_rows=current_red_flag_rows,
+        past_red_flag_rows=past_red_flag_rows,
+        day_rows=day_rows,
+        week_rows=week_rows,
+    )
+
+
+def render_markdown(args: argparse.Namespace, assessment: HistoricalAssessment) -> None:
+    args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
+    certificates = assessment.certificates
+    current_count = sum(1 for item in certificates if item.current)
+    cn_groups = assessment.cn_groups
     repeated_cn_count = sum(1 for values in cn_groups.values() if len(values) > 1)
     same_cn_same_dn = sum(1 for values in cn_groups.values() if len(values) > 1 and len({item.subject_dn for item in values}) == 1)
-    renewal_asset_count = normal_reissuance_assets + len(overlap_elevated_rows) + len(overlap_extended_rows)
 
     lines: list[str] = []
     lines.append("# Historical Certificate Lineage Analysis")
@@ -743,13 +873,11 @@ def render_markdown(
             f"- Currently valid subset inside that historical corpus: **{current_count}**.",
             f"- Distinct Subject CN values: **{len(cn_groups)}**.",
             f"- Subject CNs with more than one certificate over time: **{repeated_cn_count}**.",
-            f"- Renewal asset lineages with normal brief rollover: **{normal_reissuance_assets}**.",
-            f"- Renewal asset lineages with elevated overlap: **{len(overlap_elevated_rows)}**.",
-            f"- Renewal asset lineages with extended overlap red flags: **{len(overlap_extended_rows)}**.",
-            f"- Subject CN values with Subject DN drift: **{len(dn_rows)}**.",
-            f"- Subject CN values with CA lineage drift: **{len(vendor_rows)}**.",
-            f"- Subject CN values with SAN profile drift: **{len(san_rows)}**.",
-            f"- Subject CN values carrying at least one red-flag category: **{len(red_flag_rows)}**.",
+            f"- Renewal asset lineages with only normal rollover overlap (`<50 days`): **{assessment.normal_reissuance_assets}**.",
+            f"- Renewal asset lineages with a current overlap red flag (`>=50 days`): **{len(assessment.overlap_current_rows)}**.",
+            f"- Renewal asset lineages with a past-only overlap red flag now fixed: **{len(assessment.overlap_past_rows)}**.",
+            f"- Subject CN values with current red flags: **{len(assessment.current_red_flag_rows)}**.",
+            f"- Subject CN values with past-only red flags now fixed: **{len(assessment.past_red_flag_rows)}**.",
         ]
     )
     lines.append("")
@@ -764,28 +892,31 @@ def render_markdown(
             "- **SAN profile** means the complete set of SAN entries carried by a certificate.",
             "- **CA lineage** collapses exact issuer names into vendor-level families. In this report, legacy COMODO and Sectigo are treated as one lineage: `Sectigo/COMODO`.",
             "- A **renewal asset lineage** means the same Subject CN, same Subject DN, same SAN profile, and same CA lineage reissued over time.",
-            "- Overlap thresholds used here: `0-14 days = brief rollover`, `15-45 days = elevated overlap`, `>45 days = extended overlap red flag`.",
+            "- Overlap threshold used here: anything `<50 days` is treated as normal rollover; anything `>=50 days` is treated as a red flag.",
+            "- A **past-only** red flag means the issue is visible historically, but no currently valid certificate still carries that same red-flag condition.",
+            "- A **current** red flag means at least one currently valid certificate still participates in that same red-flag condition.",
         ]
     )
     lines.append("")
-    lines.append("## Chapter 1: Normal Renewal Versus Concurrent Validity")
+    lines.append("## Chapter 1: Renewal Baseline Versus Overlap Red Flags")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
     lines.extend(
         [
             f"- {repeated_cn_count} of {len(cn_groups)} Subject CN values have more than one certificate across the historical corpus.",
-            f"- {renewal_asset_count} renewal asset lineages contain more than one certificate.",
-            f"- {normal_reissuance_assets} of those renewal asset lineages show only brief rollover overlap and fit the normal renewal model.",
-            f"- {len(overlap_elevated_rows)} show elevated overlap and {len(overlap_extended_rows)} show extended overlap red flags.",
+            f"- {assessment.repeated_asset_count} renewal asset lineages contain more than one certificate.",
+            f"- {assessment.normal_reissuance_assets} of those renewal asset lineages stay below the 50-day overlap threshold and fit the normal renewal model.",
+            f"- {len(assessment.overlap_current_rows)} renewal asset lineages still have a current overlap red flag.",
+            f"- {len(assessment.overlap_past_rows)} renewal asset lineages had an overlap red flag historically, but that issue is not current anymore.",
             f"- {same_cn_same_dn} repeated Subject CN values keep the same Subject DN while rotating serial number, validity span, or SAN profile.",
         ]
     )
     lines.append("")
-    lines.append("This is the baseline that matters before any anomaly analysis. Most service names are not single certificates frozen in time. They are lineages of certificates issued, renewed, and sometimes restructured under the same public hostname. The key distinction is whether successor and predecessor overlap only briefly, which is normal, or coexist for a long time, which is operationally sloppier and therefore more suspicious.")
+    lines.append("This is the baseline that matters before any anomaly analysis. Most service names are not single certificates frozen in time. They are lineages of certificates issued, renewed, and sometimes restructured under the same public hostname. The key distinction is whether successor and predecessor overlap only briefly, which is normal, or coexist for fifty days or longer, which is the threshold treated here as a red flag.")
     lines.append("")
-    if overlap_elevated_rows or overlap_extended_rows:
-        lines.append("### Concurrent-Validity Deviations")
+    if assessment.overlap_current_rows:
+        lines.append("### Current Overlap Red Flags")
         lines.append("")
         lines.extend(
             md_table(
@@ -801,24 +932,48 @@ def render_markdown(
                         row.overlap_class,
                         row.details,
                     ]
-                    for row in (overlap_extended_rows[:20] + overlap_elevated_rows[:10])
+                    for row in assessment.overlap_current_rows[:20]
                 ],
             )
         )
         lines.append("")
-    lines.append("## Chapter 2: Red-Flag Inventory")
+    if assessment.overlap_past_rows:
+        lines.append("### Past Overlap Red Flags Now Fixed")
+        lines.append("")
+        lines.extend(
+            md_table(
+                ["Subject CN", "Lineage", "Asset Certs", "Current", "Max Concurrent", "Max Overlap Days", "Class", "Asset Details"],
+                [
+                    [
+                        row.subject_cn,
+                        row.lineage,
+                        str(row.asset_variant_count),
+                        str(row.current_certificate_count),
+                        str(row.max_concurrent),
+                        str(row.max_overlap_days),
+                        row.overlap_class,
+                        row.details,
+                    ]
+                    for row in assessment.overlap_past_rows[:20]
+                ],
+            )
+        )
+        lines.append("")
+    lines.append("## Chapter 2: Current Red Flags")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
     lines.extend(
         [
-            "- The red-flag score is additive. Each category contributes one point, except extended concurrent validity which contributes three because it is closer to outright issuance sloppiness.",
-            "- The categories are: extended or elevated overlap, Subject DN drift, CA lineage drift, and SAN drift.",
-            "- This chapter is the shortest route to the names that deserve deeper manual review.",
+            f"- Current overlap red flags: {len(assessment.overlap_current_rows)} Subject-CN asset lineages.",
+            f"- Current Subject DN drift: {len(assessment.dn_current_rows)} Subject CN values.",
+            f"- Current CA lineage drift: {len(assessment.vendor_current_rows)} Subject CN values.",
+            f"- Current SAN drift: {len(assessment.san_current_rows)} Subject CN values.",
+            "- This chapter is the shortest route to the names that deserve present-tense manual review.",
         ]
     )
     lines.append("")
-    if red_flag_rows:
+    if assessment.current_red_flag_rows:
         lines.extend(
             md_table(
                 ["Subject CN", "Score", "Certs", "Current", "Flags", "Issuer Mix"],
@@ -831,24 +986,66 @@ def render_markdown(
                         row.flags,
                         row.notes,
                     ]
-                    for row in red_flag_rows[:30]
+                    for row in assessment.current_red_flag_rows[:30]
                 ],
             )
         )
         lines.append("")
-    lines.append("## Chapter 3: Subject DN Drift")
+    else:
+        lines.append("No current red flags were found under the configured rules.")
+        lines.append("")
+    lines.append("## Chapter 3: Past Red Flags Now Fixed")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
     lines.extend(
         [
-            f"- Subject CN values with more than one Subject DN: {len(dn_rows)}.",
+            f"- Past-only overlap red flags now fixed: {len(assessment.overlap_past_rows)} Subject-CN asset lineages.",
+            f"- Past-only Subject DN drift now fixed: {len(assessment.dn_past_rows)} Subject CN values.",
+            f"- Past-only CA lineage drift now fixed: {len(assessment.vendor_past_rows)} Subject CN values.",
+            f"- Past-only SAN drift now fixed: {len(assessment.san_past_rows)} Subject CN values.",
+            "- These are not present-tense problems, but they matter because they show how the estate used to behave.",
+        ]
+    )
+    lines.append("")
+    if assessment.past_red_flag_rows:
+        lines.extend(
+            md_table(
+                ["Subject CN", "Score", "Certs", "Current", "Flags", "Issuer Mix"],
+                [
+                    [
+                        row.subject_cn,
+                        str(row.score),
+                        str(row.certificate_count),
+                        str(row.current_certificate_count),
+                        row.flags,
+                        row.notes,
+                    ]
+                    for row in assessment.past_red_flag_rows[:30]
+                ],
+            )
+        )
+        lines.append("")
+    else:
+        lines.append("No historical red flags were found under the configured rules.")
+        lines.append("")
+    lines.append("## Chapter 4: Subject DN Drift")
+    lines.append("")
+    lines.append("**Management Summary**")
+    lines.append("")
+    lines.extend(
+        [
+            f"- Current Subject DN drift: {len(assessment.dn_current_rows)}.",
+            f"- Past-only Subject DN drift now fixed: {len(assessment.dn_past_rows)}.",
+            f"- Total Subject CN values with more than one Subject DN across history: {len(assessment.dn_rows)}.",
             "- This is relevant because it means the hostname stayed the same while the full subject identity string changed.",
             "- That does not automatically imply a security problem, but it is exactly the kind of drift that deserves review when you care about ownership, issuance policy, or certificate governance.",
         ]
     )
     lines.append("")
-    if dn_rows:
+    if assessment.dn_current_rows:
+        lines.append("### Current Subject DN Drift")
+        lines.append("")
         lines.extend(
             md_table(
                 ["Subject CN", "Certs", "Current", "Distinct Subject DNs", "Issuer Families", "Subject DN Samples"],
@@ -861,28 +1058,49 @@ def render_markdown(
                         row.issuer_families,
                         row.details,
                     ]
-                    for row in dn_rows[:20]
+                    for row in assessment.dn_current_rows[:20]
                 ],
             )
         )
         lines.append("")
-    else:
+    if assessment.dn_past_rows:
+        lines.append("### Past Subject DN Drift Now Fixed")
+        lines.append("")
+        lines.extend(
+            md_table(
+                ["Subject CN", "Certs", "Current", "Distinct Subject DNs", "Issuer Families", "Subject DN Samples"],
+                [
+                    [
+                        row.subject_cn,
+                        str(row.certificate_count),
+                        str(row.current_certificate_count),
+                        str(row.distinct_value_count),
+                        row.issuer_families,
+                        row.details,
+                    ]
+                    for row in assessment.dn_past_rows[:20]
+                ],
+            )
+        )
+        lines.append("")
+    if not assessment.dn_rows:
         lines.append("No cases were found.")
         lines.append("")
-    lines.append("## Chapter 4: CA Lineage Drift")
+    lines.append("## Chapter 5: CA Lineage Drift")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
     lines.extend(
         [
-            f"- Subject CN values with more than one exact issuer name: {len(issuer_rows)}.",
-            f"- Subject CN values spanning more than one CA lineage: {len(vendor_rows)}.",
-            "- Exact issuer changes inside one lineage can be operationally normal. CA lineage drift is the stronger signal and therefore the primary red flag here.",
+            f"- Exact issuer-name changes across history: {len(assessment.issuer_rows)} Subject CN values.",
+            f"- Current CA lineage drift: {len(assessment.vendor_current_rows)} Subject CN values.",
+            f"- Past-only CA lineage drift now fixed: {len(assessment.vendor_past_rows)} Subject CN values.",
+            "- Exact issuer changes inside one lineage can be operationally normal. The stronger red flag is a drift between different CA lineages, with COMODO and Sectigo deliberately collapsed into one lineage here.",
         ]
     )
     lines.append("")
-    if vendor_rows:
-        lines.append("### CA Lineage Changes")
+    if assessment.vendor_current_rows:
+        lines.append("### Current CA Lineage Drift")
         lines.append("")
         lines.extend(
             md_table(
@@ -896,13 +1114,33 @@ def render_markdown(
                         row.issuer_families,
                         row.details,
                     ]
-                    for row in vendor_rows[:20]
+                    for row in assessment.vendor_current_rows[:20]
                 ],
             )
         )
         lines.append("")
-    if issuer_rows:
-        lines.append("### Exact Issuer Changes Inside Or Across Lineages")
+    if assessment.vendor_past_rows:
+        lines.append("### Past CA Lineage Drift Now Fixed")
+        lines.append("")
+        lines.extend(
+            md_table(
+                ["Subject CN", "Certs", "Current", "Distinct Lineages", "Lineage Mix", "Lineages Seen"],
+                [
+                    [
+                        row.subject_cn,
+                        str(row.certificate_count),
+                        str(row.current_certificate_count),
+                        str(row.distinct_value_count),
+                        row.issuer_families,
+                        row.details,
+                    ]
+                    for row in assessment.vendor_past_rows[:20]
+                ],
+            )
+        )
+        lines.append("")
+    if assessment.issuer_rows:
+        lines.append("### Exact Issuer Changes Inside The Same Or Different Lineages")
         lines.append("")
         lines.extend(
             md_table(
@@ -916,24 +1154,28 @@ def render_markdown(
                         row.issuer_families,
                         row.details,
                     ]
-                    for row in issuer_rows[:20]
+                    for row in assessment.issuer_rows[:20]
                 ],
             )
         )
         lines.append("")
-    lines.append("## Chapter 5: SAN Profile Drift")
+    lines.append("## Chapter 6: SAN Profile Drift")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
     lines.extend(
         [
-            f"- Subject CN values with more than one distinct SAN profile: {len(san_rows)}.",
-            f"- Top SAN-delta pattern classes: {', '.join(f'{name} ({count})' for name, count in san_pattern_counts.most_common()) or 'none'}.",
+            f"- Current SAN drift: {len(assessment.san_current_rows)} Subject CN values.",
+            f"- Past-only SAN drift now fixed: {len(assessment.san_past_rows)} Subject CN values.",
+            f"- Total Subject CN values with more than one distinct SAN profile across history: {len(assessment.san_rows)}.",
+            f"- Top SAN-delta pattern classes: {', '.join(f'{name} ({count})' for name, count in assessment.san_pattern_counts.most_common()) or 'none'}.",
             "- This shows whether the service name stayed stable while the covered endpoint set expanded, contracted, or shifted shape.",
         ]
     )
     lines.append("")
-    if san_rows:
+    if assessment.san_current_rows:
+        lines.append("### Current SAN Drift")
+        lines.append("")
         lines.extend(
             md_table(
                 [
@@ -957,12 +1199,43 @@ def render_markdown(
                         row.delta_pattern,
                         row.representative_delta,
                     ]
-                    for row in san_rows[:30]
+                    for row in assessment.san_current_rows[:20]
                 ],
             )
         )
         lines.append("")
-    lines.append("## Chapter 6: Historic Issuance Bursts And Step Changes")
+    if assessment.san_past_rows:
+        lines.append("### Past SAN Drift Now Fixed")
+        lines.append("")
+        lines.extend(
+            md_table(
+                [
+                    "Subject CN",
+                    "Certs",
+                    "Current",
+                    "SAN Profiles",
+                    "Stable SANs",
+                    "Variable SANs",
+                    "Delta Pattern",
+                    "Representative Delta",
+                ],
+                [
+                    [
+                        row.subject_cn,
+                        str(row.certificate_count),
+                        str(row.current_certificate_count),
+                        str(row.distinct_san_profiles),
+                        str(row.stable_entries),
+                        str(row.variable_entries),
+                        row.delta_pattern,
+                        row.representative_delta,
+                    ]
+                    for row in assessment.san_past_rows[:20]
+                ],
+            )
+        )
+        lines.append("")
+    lines.append("## Chapter 7: Historic Issuance Bursts And Step Changes")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
@@ -970,7 +1243,7 @@ def render_markdown(
         [
             "- This chapter includes expired certificates on purpose, because step changes are historical phenomena rather than current-only phenomena.",
             "- Strong same-day or same-week issuance bursts usually signal planned renewal waves, platform migrations, or bulk onboarding of service families.",
-            f"- Top issuance start dates: {', '.join(f'{row.start_day} ({row.certificate_count})' for row in day_rows[:6])}.",
+            f"- Top issuance start dates: {', '.join(f'{row.start_day} ({row.certificate_count})' for row in assessment.day_rows[:6])}.",
         ]
     )
     lines.append("")
@@ -979,13 +1252,13 @@ def render_markdown(
     lines.extend(
         md_table(
             ["Start Day", "Certificates", "Top Subject CNs", "Top Issuer Families"],
-            [[row.start_day, str(row.certificate_count), row.top_subjects, row.top_issuers] for row in day_rows],
+            [[row.start_day, str(row.certificate_count), row.top_subjects, row.top_issuers] for row in assessment.day_rows],
         )
     )
     lines.append("")
     lines.append("### Step Weeks")
     lines.append("")
-    if week_rows:
+    if assessment.week_rows:
         lines.extend(
             md_table(
                 ["Week Start", "Certificates", "Prior 8-Week Avg", "Top Subject CNs", "Top Issuer Families"],
@@ -997,7 +1270,7 @@ def render_markdown(
                         row.top_subjects,
                         row.top_issuers,
                     ]
-                    for row in week_rows[:20]
+                    for row in assessment.week_rows[:20]
                 ],
             )
         )
@@ -1005,35 +1278,20 @@ def render_markdown(
     else:
         lines.append("No step weeks met the configured threshold.")
         lines.append("")
-    lines.append("## Chapter 7: Interpretation")
+    lines.append("## Chapter 8: Interpretation")
     lines.append("")
-    lines.append("The main operational picture is not one of single certificates mapped one-to-one to service names. It is a layered certificate lineage model. The normal case is brief rollover inside a stable renewal asset lineage. The red flags are the exceptions layered on top of that baseline: long concurrent validity, Subject DN drift, CA lineage drift, and SAN drift. Historic issuance bursts matter because they show when those changes happened in bulk rather than one certificate at a time.")
+    lines.append("The main operational picture is not one of single certificates mapped one-to-one to service names. It is a layered certificate lineage model. The normal case is rollover inside a stable renewal asset lineage with less than fifty days of overlap. The red flags are the exceptions layered on top of that baseline: overlap that persists for fifty days or more, Subject DN drift, CA lineage drift, and SAN drift. The current-versus-past split matters because it distinguishes live governance concerns from issues that appear to have been corrected already.")
     lines.append("")
     args.markdown_output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def render_latex(
-    args: argparse.Namespace,
-    domains: list[str],
-    certificates: list[HistoricalCertificate],
-    dn_rows: list[CnCollisionRow],
-    issuer_rows: list[CnCollisionRow],
-    vendor_rows: list[CnCollisionRow],
-    san_rows: list[SanChangeRow],
-    san_pattern_counts: Counter[str],
-    overlap_elevated_rows: list[OverlapRow],
-    overlap_extended_rows: list[OverlapRow],
-    normal_reissuance_assets: int,
-    red_flag_rows: list[RedFlagRow],
-    day_rows: list[StartDayRow],
-    week_rows: list[StepWeekRow],
-) -> None:
+def render_latex(args: argparse.Namespace, assessment: HistoricalAssessment) -> None:
     args.latex_output.parent.mkdir(parents=True, exist_ok=True)
+    certificates = assessment.certificates
     current_count = sum(1 for item in certificates if item.current)
-    cn_groups = group_by_subject_cn(certificates)
+    cn_groups = assessment.cn_groups
     repeated_cn_count = sum(1 for values in cn_groups.values() if len(values) > 1)
     same_cn_same_dn = sum(1 for values in cn_groups.values() if len(values) > 1 and len({item.subject_dn for item in values}) == 1)
-    renewal_asset_count = normal_reissuance_assets + len(overlap_elevated_rows) + len(overlap_extended_rows)
 
     lines: list[str] = [
         r"\documentclass[11pt]{article}",
@@ -1102,8 +1360,9 @@ def render_latex(
             f"Currently valid subset inside that historical corpus: {current_count}.",
             f"Distinct Subject CN values: {len(cn_groups)}.",
             f"Subject CN values with more than one certificate over time: {repeated_cn_count}.",
-            f"Normal brief-rollover renewal asset lineages: {normal_reissuance_assets}.",
-            f"Extended-overlap red-flag asset lineages: {len(overlap_extended_rows)}.",
+            f"Normal renewal asset lineages with overlap below 50 days: {assessment.normal_reissuance_assets}.",
+            f"Current overlap red flags: {len(assessment.overlap_current_rows)}.",
+            f"Past-only overlap red flags now fixed: {len(assessment.overlap_past_rows)}.",
         ]
     )
     lines.append(
@@ -1118,26 +1377,28 @@ def render_latex(
         "SAN profile means the complete set of SAN entries carried by a certificate.",
         "CA lineage collapses exact issuer names into vendor-level families. Legacy COMODO and Sectigo are treated as one lineage here: Sectigo/COMODO.",
         "A renewal asset lineage means the same Subject CN, same Subject DN, same SAN profile, and same CA lineage reissued over time.",
-        "Overlap thresholds used here are 0 to 14 days for brief rollover, 15 to 45 days for elevated overlap, and more than 45 days for extended-overlap red flags.",
+        "The overlap threshold used here is simple: less than 50 days is normal rollover, 50 days or more is a red flag.",
+        "A past-only red flag means it appears historically but no currently valid certificate still carries that same condition.",
     ]:
         lines.append(rf"\item {ct_scan.latex_escape(item)}")
     lines.append(r"\end{itemize}")
 
-    lines.append(r"\section{Normal Renewal Versus Concurrent Validity}")
+    lines.append(r"\section{Renewal Baseline Versus Overlap Red Flags}")
     add_summary(
         [
             f"{repeated_cn_count} of {len(cn_groups)} Subject CN values have more than one certificate across the historical corpus.",
-            f"{renewal_asset_count} renewal asset lineages contain more than one certificate.",
-            f"{normal_reissuance_assets} of those renewal asset lineages show only brief rollover overlap and fit the normal renewal model.",
-            f"{len(overlap_elevated_rows)} show elevated overlap and {len(overlap_extended_rows)} show extended overlap red flags.",
+            f"{assessment.repeated_asset_count} renewal asset lineages contain more than one certificate.",
+            f"{assessment.normal_reissuance_assets} of those renewal asset lineages stay below the 50-day overlap threshold and fit the normal renewal model.",
+            f"{len(assessment.overlap_current_rows)} still have a current overlap red flag.",
+            f"{len(assessment.overlap_past_rows)} had an overlap red flag historically, but that issue is not current anymore.",
             f"{same_cn_same_dn} repeated Subject CN values keep the same Subject DN while rotating serial number, validity span, or SAN profile.",
         ]
     )
     lines.append(
-        r"The baseline is ordinary certificate rollover: successor and predecessor overlap briefly while deployment is switched over. The red flag is not reissuance itself, but long-lived concurrent validity for what otherwise looks like the same renewal asset lineage."
+        r"The baseline is ordinary certificate rollover: successor and predecessor overlap briefly while deployment is switched over. The red flag is not reissuance itself, but overlap that persists for fifty days or longer for what otherwise looks like the same renewal asset lineage."
     )
-    if overlap_elevated_rows or overlap_extended_rows:
-        lines.append(r"\subsection{Concurrent-Validity Deviations}")
+    if assessment.overlap_current_rows:
+        lines.append(r"\subsection{Current Overlap Red Flags}")
         lines.extend(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.14\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.13\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth}}",
@@ -1146,21 +1407,37 @@ def render_latex(
                 r"\midrule",
             ]
         )
-        for row in (overlap_extended_rows[:20] + overlap_elevated_rows[:10]):
+        for row in assessment.overlap_current_rows[:20]:
+            lines.append(
+                rf"{ct_scan.latex_escape(row.subject_cn)} & {ct_scan.latex_escape(row.lineage)} & {row.asset_variant_count} & {row.current_certificate_count} & {row.max_concurrent} & {row.max_overlap_days} & {ct_scan.latex_escape(row.overlap_class)} & {ct_scan.latex_escape(row.details)} \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+    if assessment.overlap_past_rows:
+        lines.append(r"\subsection{Past Overlap Red Flags Now Fixed}")
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.14\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.13\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth}}",
+                r"\toprule",
+                r"Subject CN & Lineage & Asset Certs & Current & Max Concurrent & Max Overlap Days & Class & Asset Details \\",
+                r"\midrule",
+            ]
+        )
+        for row in assessment.overlap_past_rows[:20]:
             lines.append(
                 rf"{ct_scan.latex_escape(row.subject_cn)} & {ct_scan.latex_escape(row.lineage)} & {row.asset_variant_count} & {row.current_certificate_count} & {row.max_concurrent} & {row.max_overlap_days} & {ct_scan.latex_escape(row.overlap_class)} & {ct_scan.latex_escape(row.details)} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
 
-    lines.append(r"\section{Red-Flag Inventory}")
+    lines.append(r"\section{Current Red Flags}")
     add_summary(
         [
-            "The red-flag score is additive.",
-            "Each category contributes one point, except extended concurrent validity which contributes three because it is closer to outright issuance sloppiness.",
-            "The categories are overlap deviation, Subject DN drift, CA lineage drift, and SAN drift.",
+            f"Current overlap red flags: {len(assessment.overlap_current_rows)} Subject-CN asset lineages.",
+            f"Current Subject DN drift: {len(assessment.dn_current_rows)} Subject CN values.",
+            f"Current CA lineage drift: {len(assessment.vendor_current_rows)} Subject CN values.",
+            f"Current SAN drift: {len(assessment.san_current_rows)} Subject CN values.",
         ]
     )
-    if red_flag_rows:
+    if assessment.current_red_flag_rows:
         lines.extend(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedright\arraybackslash}p{0.30\linewidth} >{\raggedright\arraybackslash}p{0.26\linewidth}}",
@@ -1169,21 +1446,52 @@ def render_latex(
                 r"\midrule",
             ]
         )
-        for row in red_flag_rows[:30]:
+        for row in assessment.current_red_flag_rows[:30]:
             lines.append(
                 rf"{ct_scan.latex_escape(row.subject_cn)} & {row.score} & {row.certificate_count} & {row.current_certificate_count} & {ct_scan.latex_escape(row.flags)} & {ct_scan.latex_escape(row.notes)} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
+    else:
+        lines.append(r"No current red flags were found under the configured rules.")
+
+    lines.append(r"\section{Past Red Flags Now Fixed}")
+    add_summary(
+        [
+            f"Past-only overlap red flags now fixed: {len(assessment.overlap_past_rows)} Subject-CN asset lineages.",
+            f"Past-only Subject DN drift now fixed: {len(assessment.dn_past_rows)} Subject CN values.",
+            f"Past-only CA lineage drift now fixed: {len(assessment.vendor_past_rows)} Subject CN values.",
+            f"Past-only SAN drift now fixed: {len(assessment.san_past_rows)} Subject CN values.",
+        ]
+    )
+    if assessment.past_red_flag_rows:
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedright\arraybackslash}p{0.30\linewidth} >{\raggedright\arraybackslash}p{0.26\linewidth}}",
+                r"\toprule",
+                r"Subject CN & Score & Certs & Current & Flags & Issuer Mix \\",
+                r"\midrule",
+            ]
+        )
+        for row in assessment.past_red_flag_rows[:30]:
+            lines.append(
+                rf"{ct_scan.latex_escape(row.subject_cn)} & {row.score} & {row.certificate_count} & {row.current_certificate_count} & {ct_scan.latex_escape(row.flags)} & {ct_scan.latex_escape(row.notes)} \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+    else:
+        lines.append(r"No historical red flags were found under the configured rules.")
 
     lines.append(r"\section{Subject DN Drift}")
     add_summary(
         [
-            f"Subject CN values with more than one Subject DN: {len(dn_rows)}.",
+            f"Current Subject DN drift: {len(assessment.dn_current_rows)}.",
+            f"Past-only Subject DN drift now fixed: {len(assessment.dn_past_rows)}.",
+            f"Total Subject CN values with more than one Subject DN across history: {len(assessment.dn_rows)}.",
             "This matters because the hostname stayed the same while the full subject identity string changed.",
             "That is not automatically a security problem, but it is relevant governance drift.",
         ]
     )
-    if dn_rows:
+    if assessment.dn_current_rows:
+        lines.append(r"\subsection{Current Subject DN Drift}")
         lines.extend(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedright\arraybackslash}p{0.29\linewidth}}",
@@ -1192,24 +1500,40 @@ def render_latex(
                 r"\midrule",
             ]
         )
-        for row in dn_rows[:20]:
+        for row in assessment.dn_current_rows[:20]:
             lines.append(
                 rf"{ct_scan.latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_value_count} & {ct_scan.latex_escape(row.issuer_families)} & {ct_scan.latex_escape(row.details)} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
-    else:
+    if assessment.dn_past_rows:
+        lines.append(r"\subsection{Past Subject DN Drift Now Fixed}")
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedright\arraybackslash}p{0.29\linewidth}}",
+                r"\toprule",
+                r"Subject CN & Certs & Current & Distinct Subject DNs & Issuer Families & Subject DN Samples \\",
+                r"\midrule",
+            ]
+        )
+        for row in assessment.dn_past_rows[:20]:
+            lines.append(
+                rf"{ct_scan.latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_value_count} & {ct_scan.latex_escape(row.issuer_families)} & {ct_scan.latex_escape(row.details)} \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+    if not assessment.dn_rows:
         lines.append(r"No cases were found.")
 
     lines.append(r"\section{CA Lineage Drift}")
     add_summary(
         [
-            f"Subject CN values with more than one exact issuer name: {len(issuer_rows)}.",
-            f"Subject CN values spanning more than one CA lineage: {len(vendor_rows)}.",
-            "Exact issuer changes inside one lineage can be operationally normal. CA lineage drift is the stronger signal and therefore the primary red flag here.",
+            f"Exact issuer-name changes across history: {len(assessment.issuer_rows)} Subject CN values.",
+            f"Current CA lineage drift: {len(assessment.vendor_current_rows)} Subject CN values.",
+            f"Past-only CA lineage drift now fixed: {len(assessment.vendor_past_rows)} Subject CN values.",
+            "Exact issuer changes inside one lineage can be operationally normal. CA lineage drift is the stronger signal, with COMODO and Sectigo deliberately collapsed into one lineage.",
         ]
     )
-    if vendor_rows:
-        lines.append(r"\subsection{CA Lineage Changes}")
+    if assessment.vendor_current_rows:
+        lines.append(r"\subsection{Current CA Lineage Drift}")
         lines.extend(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.32\linewidth}}",
@@ -1218,13 +1542,28 @@ def render_latex(
                 r"\midrule",
             ]
         )
-        for row in vendor_rows[:20]:
+        for row in assessment.vendor_current_rows[:20]:
             lines.append(
                 rf"{ct_scan.latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_value_count} & {ct_scan.latex_escape(row.issuer_families)} & {ct_scan.latex_escape(row.details)} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
-    if issuer_rows:
-        lines.append(r"\subsection{Exact Issuer Changes Inside Or Across Lineages}")
+    if assessment.vendor_past_rows:
+        lines.append(r"\subsection{Past CA Lineage Drift Now Fixed}")
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.32\linewidth}}",
+                r"\toprule",
+                r"Subject CN & Certs & Current & Distinct Lineages & Lineage Mix & Lineages Seen \\",
+                r"\midrule",
+            ]
+        )
+        for row in assessment.vendor_past_rows[:20]:
+            lines.append(
+                rf"{ct_scan.latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_value_count} & {ct_scan.latex_escape(row.issuer_families)} & {ct_scan.latex_escape(row.details)} \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+    if assessment.issuer_rows:
+        lines.append(r"\subsection{Exact Issuer Changes Inside The Same Or Different Lineages}")
         lines.extend(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.32\linewidth}}",
@@ -1233,7 +1572,7 @@ def render_latex(
                 r"\midrule",
             ]
         )
-        for row in issuer_rows[:20]:
+        for row in assessment.issuer_rows[:20]:
             lines.append(
                 rf"{ct_scan.latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_value_count} & {ct_scan.latex_escape(row.issuer_families)} & {ct_scan.latex_escape(row.details)} \\"
             )
@@ -1242,12 +1581,15 @@ def render_latex(
     lines.append(r"\section{SAN Profile Drift}")
     add_summary(
         [
-            f"Subject CN values with more than one SAN profile: {len(san_rows)}.",
-            f"Top SAN-delta pattern classes: {', '.join(f'{name} ({count})' for name, count in san_pattern_counts.most_common()) or 'none'}.",
+            f"Current SAN drift: {len(assessment.san_current_rows)} Subject CN values.",
+            f"Past-only SAN drift now fixed: {len(assessment.san_past_rows)} Subject CN values.",
+            f"Total Subject CN values with more than one SAN profile across history: {len(assessment.san_rows)}.",
+            f"Top SAN-delta pattern classes: {', '.join(f'{name} ({count})' for name, count in assessment.san_pattern_counts.most_common()) or 'none'}.",
             "This reveals whether the endpoint surface under the same hostname stayed stable or changed shape over time.",
         ]
     )
-    if san_rows:
+    if assessment.san_current_rows:
+        lines.append(r"\subsection{Current SAN Drift}")
         lines.extend(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.25\linewidth}}",
@@ -1256,7 +1598,22 @@ def render_latex(
                 r"\midrule",
             ]
         )
-        for row in san_rows[:30]:
+        for row in assessment.san_current_rows[:20]:
+            lines.append(
+                rf"{ct_scan.latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_san_profiles} & {row.stable_entries} & {row.variable_entries} & {ct_scan.latex_escape(row.delta_pattern)} & {ct_scan.latex_escape(row.representative_delta)} \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+    if assessment.san_past_rows:
+        lines.append(r"\subsection{Past SAN Drift Now Fixed}")
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.25\linewidth}}",
+                r"\toprule",
+                r"Subject CN & Certs & Current & Profiles & Stable & Variable & Delta Pattern & Representative Delta \\",
+                r"\midrule",
+            ]
+        )
+        for row in assessment.san_past_rows[:20]:
             lines.append(
                 rf"{ct_scan.latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_san_profiles} & {row.stable_entries} & {row.variable_entries} & {ct_scan.latex_escape(row.delta_pattern)} & {ct_scan.latex_escape(row.representative_delta)} \\"
             )
@@ -1266,7 +1623,7 @@ def render_latex(
     add_summary(
         [
             "This chapter includes expired certificates on purpose, because issuance bursts are historical phenomena rather than current-only phenomena.",
-            f"Top issuance start dates are {', '.join(f'{row.start_day} ({row.certificate_count})' for row in day_rows[:6])}.",
+            f"Top issuance start dates are {', '.join(f'{row.start_day} ({row.certificate_count})' for row in assessment.day_rows[:6])}.",
             "Strong same-day or same-week bursts usually indicate planned renewal waves, platform migrations, or bulk onboarding of service families.",
         ]
     )
@@ -1279,13 +1636,13 @@ def render_latex(
             r"\midrule",
         ]
     )
-    for row in day_rows:
+    for row in assessment.day_rows:
         lines.append(
             rf"{ct_scan.latex_escape(row.start_day)} & {row.certificate_count} & {ct_scan.latex_escape(row.top_subjects)} & {ct_scan.latex_escape(row.top_issuers)} \\"
         )
     lines.extend([r"\bottomrule", r"\end{longtable}"])
     lines.append(r"\subsection{Step Weeks}")
-    if week_rows:
+    if assessment.week_rows:
         lines.extend(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.13\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.35\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth}}",
@@ -1294,7 +1651,7 @@ def render_latex(
                 r"\midrule",
             ]
         )
-        for row in week_rows[:20]:
+        for row in assessment.week_rows[:20]:
             lines.append(
                 rf"{ct_scan.latex_escape(row.week_start)} & {row.certificate_count} & {ct_scan.latex_escape(row.prior_eight_week_avg)} & {ct_scan.latex_escape(row.top_subjects)} & {ct_scan.latex_escape(row.top_issuers)} \\"
             )
@@ -1304,7 +1661,7 @@ def render_latex(
 
     lines.append(r"\section{Interpretation}")
     lines.append(
-        r"The public certificate view is not just a static inventory. It is a change log. The normal case is brief rollover inside a stable renewal asset lineage. The red flags are the exceptions layered on top of that baseline: long concurrent validity, Subject DN drift, CA lineage drift, and SAN drift. Historic issuance bursts matter because they show when those changes happened in bulk rather than one certificate at a time."
+        r"The public certificate view is not just a static inventory. It is a change log. The normal case is rollover inside a stable renewal asset lineage with less than fifty days of overlap. The red flags are the exceptions layered on top of that baseline: overlap of fifty days or more, Subject DN drift, CA lineage drift, and SAN drift. The current-versus-past split matters because it separates live governance concerns from issues that appear to have been corrected already."
     )
     lines.extend([r"\end{document}"])
     args.latex_output.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1312,60 +1669,14 @@ def render_latex(
 
 def main() -> int:
     args = parse_args()
-    domains, records = load_records(args)
-    certificates = build_certificates(records)
-    cn_groups = group_by_subject_cn(certificates)
-    dn_rows = dn_change_rows(cn_groups)
-    issuer_rows, vendor_rows = issuer_change_rows(cn_groups)
-    san_rows, san_pattern_counts = san_change_rows(cn_groups)
-    overlap_elevated_rows, overlap_extended_rows, normal_reissuance_assets = overlap_rows(cn_groups)
-    red_flag_rows = build_red_flag_rows(
-        cn_groups,
-        dn_rows,
-        vendor_rows,
-        san_rows,
-        overlap_extended_rows,
-        overlap_elevated_rows,
-    )
-    day_rows = top_start_days(certificates)
-    week_rows = spike_weeks(certificates)
-    render_markdown(
-        args,
-        domains,
-        certificates,
-        dn_rows,
-        issuer_rows,
-        vendor_rows,
-        san_rows,
-        san_pattern_counts,
-        overlap_elevated_rows,
-        overlap_extended_rows,
-        normal_reissuance_assets,
-        red_flag_rows,
-        day_rows,
-        week_rows,
-    )
-    render_latex(
-        args,
-        domains,
-        certificates,
-        dn_rows,
-        issuer_rows,
-        vendor_rows,
-        san_rows,
-        san_pattern_counts,
-        overlap_elevated_rows,
-        overlap_extended_rows,
-        normal_reissuance_assets,
-        red_flag_rows,
-        day_rows,
-        week_rows,
-    )
+    assessment = build_assessment(args)
+    render_markdown(args, assessment)
+    render_latex(args, assessment)
     if not args.skip_pdf:
         ct_scan.compile_latex_to_pdf(args.latex_output, args.pdf_output, args.pdf_engine)
     if not args.quiet:
         print(
-            f"[report] historical_leaf={len(certificates)} markdown={args.markdown_output} latex={args.latex_output}"
+            f"[report] historical_leaf={len(assessment.certificates)} markdown={args.markdown_output} latex={args.latex_output}"
             + ("" if args.skip_pdf else f" pdf={args.pdf_output}"),
             file=__import__("sys").stderr,
         )

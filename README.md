@@ -1,12 +1,12 @@
 # Certificate Transparency Search
 
-This project builds a publication-grade report set from Certificate Transparency and public DNS:
+This project builds a publication-grade monograph from Certificate Transparency and public DNS:
 
 - it finds currently valid leaf certificates whose SAN values contain configured search terms
 - it verifies locally that the certificates are real leaf certificates rather than CA certificates or precertificates
 - it assesses intended usage from EKU and KeyUsage
 - it scans the DNS names exposed by the SAN corpus
-- it produces readable Markdown, LaTeX, and PDF outputs
+- it produces one primary readable output set: a monograph in Markdown, LaTeX, and PDF
 
 The project is designed for public source control:
 
@@ -78,7 +78,7 @@ Rules:
 
 ### Main publication
 
-This is the publication-grade monograph with appendices:
+This is the single canonical publication. The appendices are embedded into the same monograph, so you do not need to manage separate visible appendix artefacts:
 
 ```bash
 make monograph
@@ -89,11 +89,12 @@ Outputs:
 - `output/corpus/monograph.md`
 - `output/corpus/monograph.tex`
 - `output/corpus/monograph.pdf`
-- `output/corpus/appendix-inventory.md`
-- `output/corpus/appendix-inventory.tex`
-- `output/corpus/appendix-inventory.pdf`
+
+Internal helper artefacts used during PDF assembly are written only under `.cache/monograph-temp/`.
 
 ### Supporting purpose assessment
+
+This is optional. Its findings are already woven into the monograph, but the standalone output can still be useful during development:
 
 ```bash
 make purpose
@@ -105,6 +106,8 @@ Outputs:
 - `output/corpus/certificate-purpose-assessment.json`
 
 ### Historical lineage analysis
+
+This is optional. Its findings are already woven into the monograph, but the standalone output can still be useful during development:
 
 This report extends the analysis across current and expired certificates to study:
 
@@ -138,7 +141,7 @@ Outputs:
 
 ### Full operator run
 
-This creates the local config if missing, then runs the purpose assessment, historical lineage analysis, and the full monograph:
+This creates the local config if missing, then builds the full monograph:
 
 ```bash
 make all
@@ -176,6 +179,8 @@ make monograph DOMAINS=/path/to/other.local.txt
 If you do not want to use `make`, the equivalent commands are:
 
 ### Inventory appendix source
+
+This is only needed if you want the raw family inventory outside the monograph:
 
 ```bash
 .venv/bin/python ct_scan.py \
@@ -233,10 +238,7 @@ If you do not want to use `make`, the equivalent commands are:
   --max-candidates-per-domain 10000 \
   --markdown-output output/corpus/monograph.md \
   --latex-output output/corpus/monograph.tex \
-  --pdf-output output/corpus/monograph.pdf \
-  --appendix-markdown-output output/corpus/appendix-inventory.md \
-  --appendix-latex-output output/corpus/appendix-inventory.tex \
-  --appendix-pdf-output output/corpus/appendix-inventory.pdf
+  --pdf-output output/corpus/monograph.pdf
 ```
 
 ## Project Structure
@@ -246,7 +248,7 @@ If you do not want to use `make`, the equivalent commands are:
 - `ct_lineage_report.py`: historical Subject CN, Subject DN, issuer, SAN, and issuance-burst analysis
 - `ct_dns_utils.py`: DNS scanning and provider-signature logic
 - `ct_master_report.py`: shorter consolidated report
-- `ct_monograph_report.py`: publication-grade monograph with appendices
+- `ct_monograph_report.py`: publication-grade monograph with embedded appendices
 - `Makefile`: reproducible operator workflow
 
 ## Safety Against Silent Undercounts
