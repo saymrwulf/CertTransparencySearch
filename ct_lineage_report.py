@@ -47,16 +47,37 @@ SELECT
     ci.not_after,
     cl.first_seen,
     ci.serial_number,
-    0 AS revoked_count,
-    NULL::timestamp AS revocation_date,
-    NULL::integer AS reason_code,
-    NULL::timestamp AS last_seen_check_date,
-    0 AS active_crl_count,
-    NULL::timestamp AS crl_last_checked,
+    coalesce(cl.revoked, 0) AS revoked_count,
+    rev.revocation_date,
+    rev.reason_code,
+    rev.last_seen_check_date,
+    crl_state.active_crl_count,
+    crl_state.last_checked AS crl_last_checked,
     ci.certificate
 FROM ci
 JOIN ca ON ca.id = ci.issuer_ca_id
 JOIN certificate_lifecycle cl ON cl.certificate_id = ci.id
+LEFT JOIN LATERAL (
+    SELECT
+        cr.revocation_date,
+        cr.reason_code,
+        cr.last_seen_check_date
+    FROM crl_revoked cr
+    WHERE cr.ca_id = ci.issuer_ca_id
+      AND cr.serial_number = decode(ci.serial_number, 'hex')
+    ORDER BY cr.last_seen_check_date DESC NULLS LAST
+    LIMIT 1
+) rev ON TRUE
+LEFT JOIN LATERAL (
+    SELECT
+        count(*) FILTER (
+            WHERE crl.error_message IS NULL
+              AND crl.next_update > now() AT TIME ZONE 'UTC'
+        ) AS active_crl_count,
+        max(crl.last_checked) AS last_checked
+    FROM crl
+    WHERE crl.ca_id = ci.issuer_ca_id
+) crl_state ON TRUE
 WHERE cl.certificate_type = 'Certificate'
 ORDER BY ci.not_before ASC, cl.first_seen ASC NULLS LAST, ci.id ASC;
 """
@@ -97,9 +118,12 @@ class HistoricalCertificate:
     issuer_family: str
     validity_not_before: datetime
     validity_not_after: datetime
+    effective_not_after: datetime
     san_entries: list[str]
     first_seen: datetime | None
     current: bool
+    revocation_status: str
+    revocation_date: datetime | None
     matched_domains: set[str] = field(default_factory=set)
     crtsh_certificate_ids: set[int] = field(default_factory=set)
     serial_numbers: set[str] = field(default_factory=set)
@@ -144,12 +168,34 @@ class StepWeekRow:
     top_issuers: str
 
 
+@dataclass
+class OverlapRow:
+    subject_cn: str
+    asset_variant_count: int
+    current_certificate_count: int
+    lineage: str
+    max_concurrent: int
+    max_overlap_days: int
+    overlap_class: str
+    details: str
+
+
+@dataclass
+class RedFlagRow:
+    subject_cn: str
+    score: int
+    certificate_count: int
+    current_certificate_count: int
+    flags: str
+    notes: str
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Analyse historical certificate lineage, CN reuse, issuer drift, SAN drift, and issuance bursts."
     )
     parser.add_argument("--domains-file", type=Path, default=Path("domains.local.txt"))
-    parser.add_argument("--cache-dir", type=Path, default=Path(".cache/ct-history"))
+    parser.add_argument("--cache-dir", type=Path, default=Path(".cache/ct-history-v2"))
     parser.add_argument("--cache-ttl-seconds", type=int, default=0)
     parser.add_argument("--max-candidates-per-domain", type=int, default=10000)
     parser.add_argument("--retries", type=int, default=3)
@@ -178,10 +224,8 @@ def short_issuer(issuer_name: str) -> str:
     lowered = issuer_name.lower()
     if "amazon" in lowered:
         return "Amazon"
-    if "sectigo" in lowered:
-        return "Sectigo"
-    if "comodo" in lowered:
-        return "COMODO"
+    if "sectigo" in lowered or "comodo" in lowered:
+        return "Sectigo/COMODO"
     if "digicert" in lowered:
         return "DigiCert"
     if "symantec" in lowered:
@@ -230,10 +274,25 @@ def query_historical_domain(domain: str, max_candidates: int, attempts: int, qui
         "name_pattern": f"%{ct_scan.escape_like(domain)}%",
         "max_candidates": max_candidates,
     }
-    with ct_scan.connect() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(HISTORICAL_QUERY_SQL, params)
-        rows = cur.fetchall()
-    return [ct_scan.row_to_record(domain, row) for row in rows]
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with ct_scan.connect() as conn, conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(HISTORICAL_QUERY_SQL, params)
+                rows = cur.fetchall()
+            return [ct_scan.row_to_record(domain, row) for row in rows]
+        except Exception as exc:
+            last_error = exc
+            if attempt == attempts:
+                break
+            if not quiet:
+                print(
+                    f"[warn] historical domain={domain} attempt={attempt}/{attempts} failed: {exc}",
+                    file=__import__("sys").stderr,
+                )
+            __import__("time").sleep(min(2 ** attempt, 10))
+    assert last_error is not None
+    raise last_error
 
 
 def load_records(args: argparse.Namespace) -> tuple[list[str], list[ct_scan.DatabaseRecord]]:
@@ -276,6 +335,10 @@ def build_certificates(records: list[ct_scan.DatabaseRecord]) -> list[Historical
         hit = by_fingerprint.get(fingerprint_sha256)
         if hit is None:
             subject_cn = record.common_name or extract_common_name(cert) or "-"
+            revocation_status, revocation_date, _revocation_reason, _crtsh_crl_timestamp, _revocation_note = ct_scan.revocation_fields(record)
+            effective_not_after = record.not_after
+            if revocation_status == "revoked" and revocation_date is not None and revocation_date < effective_not_after:
+                effective_not_after = revocation_date
             hit = HistoricalCertificate(
                 fingerprint_sha256=fingerprint_sha256,
                 subject_cn=subject_cn,
@@ -284,9 +347,12 @@ def build_certificates(records: list[ct_scan.DatabaseRecord]) -> list[Historical
                 issuer_family=short_issuer(record.issuer_name),
                 validity_not_before=record.not_before,
                 validity_not_after=record.not_after,
+                effective_not_after=effective_not_after,
                 san_entries=ct_scan.extract_san_entries(cert),
                 first_seen=record.first_seen,
                 current=record.not_before <= now <= record.not_after,
+                revocation_status=revocation_status,
+                revocation_date=revocation_date,
                 matched_domains={record.domain},
                 crtsh_certificate_ids={record.certificate_id},
                 serial_numbers={record.serial_number},
@@ -453,6 +519,140 @@ def san_change_rows(cn_groups: dict[str, list[HistoricalCertificate]]) -> tuple[
     return rows, pattern_counts
 
 
+def overlap_days(left: HistoricalCertificate, right: HistoricalCertificate) -> int:
+    start = max(left.validity_not_before, right.validity_not_before)
+    end = min(left.effective_not_after, right.effective_not_after)
+    if end <= start:
+        return 0
+    return max(1, (end - start).days)
+
+
+def overlap_class(days: int) -> str:
+    if days <= 0:
+        return "no overlap"
+    if days <= 14:
+        return "brief rollover"
+    if days <= 45:
+        return "elevated overlap"
+    return "extended overlap"
+
+
+def build_asset_key(certificate: HistoricalCertificate) -> tuple[str, str, tuple[str, ...], str]:
+    return (
+        certificate.subject_cn.lower(),
+        certificate.subject_dn,
+        tuple(certificate.san_entries),
+        certificate.issuer_family,
+    )
+
+
+def overlap_rows(cn_groups: dict[str, list[HistoricalCertificate]]) -> tuple[list[OverlapRow], list[OverlapRow]]:
+    normal_reissuance = 0
+    elevated: list[OverlapRow] = []
+    extended: list[OverlapRow] = []
+    for certificates in cn_groups.values():
+        by_asset: dict[tuple[str, str, tuple[str, ...], str], list[HistoricalCertificate]] = defaultdict(list)
+        for certificate in certificates:
+            by_asset[build_asset_key(certificate)].append(certificate)
+        for asset_certificates in by_asset.values():
+            if len(asset_certificates) < 2:
+                continue
+            ordered = sorted(
+                asset_certificates,
+                key=lambda item: (
+                    item.validity_not_before,
+                    item.effective_not_after,
+                    item.fingerprint_sha256,
+                ),
+            )
+            max_overlap = 0
+            max_concurrent = 1
+            active: list[HistoricalCertificate] = []
+            for certificate in ordered:
+                active = [item for item in active if item.effective_not_after > certificate.validity_not_before]
+                for other in active:
+                    max_overlap = max(max_overlap, overlap_days(other, certificate))
+                active.append(certificate)
+                max_concurrent = max(max_concurrent, len(active))
+            if max_overlap <= 14 and max_concurrent <= 2:
+                normal_reissuance += 1
+                continue
+            representative = ordered[0]
+            row = OverlapRow(
+                subject_cn=representative.subject_cn,
+                asset_variant_count=len(ordered),
+                current_certificate_count=sum(1 for item in ordered if item.current),
+                lineage=representative.issuer_family,
+                max_concurrent=max_concurrent,
+                max_overlap_days=max_overlap,
+                overlap_class=overlap_class(max_overlap),
+                details=(
+                    f"DN={representative.subject_dn}; "
+                    f"SANs={len(representative.san_entries)}; "
+                    f"windows={', '.join(f'{item.validity_not_before.date().isoformat()}->{item.effective_not_after.date().isoformat()}' for item in ordered[:4])}"
+                    + ("" if len(ordered) <= 4 else f", ... (+{len(ordered) - 4} more)")
+                ),
+            )
+            if max_overlap > 45 or max_concurrent > 2:
+                extended.append(row)
+            else:
+                elevated.append(row)
+    ordering = lambda item: (-item.max_overlap_days, -item.max_concurrent, -item.asset_variant_count, item.subject_cn.casefold())
+    return (sorted(elevated, key=ordering), sorted(extended, key=ordering), normal_reissuance)
+
+
+def build_red_flag_rows(
+    cn_groups: dict[str, list[HistoricalCertificate]],
+    dn_rows: list[CnCollisionRow],
+    vendor_rows: list[CnCollisionRow],
+    san_rows: list[SanChangeRow],
+    overlap_extended_rows: list[OverlapRow],
+    overlap_elevated_rows: list[OverlapRow],
+) -> list[RedFlagRow]:
+    dn_set = {row.subject_cn.lower() for row in dn_rows}
+    vendor_set = {row.subject_cn.lower() for row in vendor_rows}
+    san_set = {row.subject_cn.lower() for row in san_rows}
+    extended_set = {row.subject_cn.lower() for row in overlap_extended_rows}
+    elevated_set = {row.subject_cn.lower() for row in overlap_elevated_rows}
+    rows: list[RedFlagRow] = []
+    for key, certificates in cn_groups.items():
+        flags: list[str] = []
+        if key in extended_set:
+            flags.append("extended concurrent validity")
+        elif key in elevated_set:
+            flags.append("elevated overlap")
+        if key in dn_set:
+            flags.append("Subject DN drift")
+        if key in vendor_set:
+            flags.append("CA lineage drift")
+        if key in san_set:
+            flags.append("SAN drift")
+        if not flags:
+            continue
+        score = 0
+        for flag in flags:
+            if flag == "extended concurrent validity":
+                score += 3
+            elif flag == "elevated overlap":
+                score += 1
+            else:
+                score += 1
+        issuer_mix = Counter(item.issuer_family for item in certificates)
+        notes = ", ".join(f"{name} ({count})" for name, count in issuer_mix.most_common())
+        rows.append(
+            RedFlagRow(
+                subject_cn=min({item.subject_cn for item in certificates}, key=str.casefold),
+                score=score,
+                certificate_count=len(certificates),
+                current_certificate_count=sum(1 for item in certificates if item.current),
+                flags=", ".join(flags),
+                notes=notes,
+            )
+        )
+    rows.sort(key=lambda item: (-item.score, -item.certificate_count, item.subject_cn.casefold()))
+    return rows
+
+
 def top_start_days(certificates: list[HistoricalCertificate], limit: int = 12) -> list[StartDayRow]:
     by_day: dict[date, list[HistoricalCertificate]] = defaultdict(list)
     for certificate in certificates:
@@ -515,6 +715,10 @@ def render_markdown(
     vendor_rows: list[CnCollisionRow],
     san_rows: list[SanChangeRow],
     san_pattern_counts: Counter[str],
+    overlap_elevated_rows: list[OverlapRow],
+    overlap_extended_rows: list[OverlapRow],
+    normal_reissuance_assets: int,
+    red_flag_rows: list[RedFlagRow],
     day_rows: list[StartDayRow],
     week_rows: list[StepWeekRow],
 ) -> None:
@@ -523,6 +727,7 @@ def render_markdown(
     cn_groups = group_by_subject_cn(certificates)
     repeated_cn_count = sum(1 for values in cn_groups.values() if len(values) > 1)
     same_cn_same_dn = sum(1 for values in cn_groups.values() if len(values) > 1 and len({item.subject_dn for item in values}) == 1)
+    renewal_asset_count = normal_reissuance_assets + len(overlap_elevated_rows) + len(overlap_extended_rows)
 
     lines: list[str] = []
     lines.append("# Historical Certificate Lineage Analysis")
@@ -538,14 +743,17 @@ def render_markdown(
             f"- Currently valid subset inside that historical corpus: **{current_count}**.",
             f"- Distinct Subject CN values: **{len(cn_groups)}**.",
             f"- Subject CNs with more than one certificate over time: **{repeated_cn_count}**.",
-            f"- Same Subject CN with different Subject DN: **{len(dn_rows)}**.",
-            f"- Same Subject CN with different exact issuer names: **{len(issuer_rows)}**.",
-            f"- Same Subject CN with different issuer families or vendors: **{len(vendor_rows)}**.",
-            f"- Same Subject CN with different SAN profiles: **{len(san_rows)}**.",
+            f"- Renewal asset lineages with normal brief rollover: **{normal_reissuance_assets}**.",
+            f"- Renewal asset lineages with elevated overlap: **{len(overlap_elevated_rows)}**.",
+            f"- Renewal asset lineages with extended overlap red flags: **{len(overlap_extended_rows)}**.",
+            f"- Subject CN values with Subject DN drift: **{len(dn_rows)}**.",
+            f"- Subject CN values with CA lineage drift: **{len(vendor_rows)}**.",
+            f"- Subject CN values with SAN profile drift: **{len(san_rows)}**.",
+            f"- Subject CN values carrying at least one red-flag category: **{len(red_flag_rows)}**.",
         ]
     )
     lines.append("")
-    lines.append("This report treats Subject CN as a hostname label, not as a unique asset key. The point is to follow certificate lineage through renewals, issuer changes, SAN changes, and issuance bursts across both current and expired certificates.")
+    lines.append("This report treats Subject CN as a hostname label, not as a unique asset key. The point is to follow certificate lineage through renewals, issuer changes, SAN changes, and issuance bursts across both current and expired certificates, while separating normal rollover from red-flag behavior.")
     lines.append("")
     lines.append("## Reading Notes")
     lines.append("")
@@ -554,25 +762,81 @@ def render_markdown(
             "- **Subject CN** is the hostname placed in the certificate's Common Name field.",
             "- **Subject DN** is the full subject identity string, not just the hostname.",
             "- **SAN profile** means the complete set of SAN entries carried by a certificate.",
-            "- **Issuer family** collapses exact issuer names into vendor-level families such as Amazon, Sectigo, COMODO, and Google Trust Services.",
+            "- **CA lineage** collapses exact issuer names into vendor-level families. In this report, legacy COMODO and Sectigo are treated as one lineage: `Sectigo/COMODO`.",
+            "- A **renewal asset lineage** means the same Subject CN, same Subject DN, same SAN profile, and same CA lineage reissued over time.",
+            "- Overlap thresholds used here: `0-14 days = brief rollover`, `15-45 days = elevated overlap`, `>45 days = extended overlap red flag`.",
         ]
     )
     lines.append("")
-    lines.append("## Chapter 1: Reissuance Is The Rule, Not The Exception")
+    lines.append("## Chapter 1: Normal Renewal Versus Concurrent Validity")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
     lines.extend(
         [
             f"- {repeated_cn_count} of {len(cn_groups)} Subject CN values have more than one certificate across the historical corpus.",
+            f"- {renewal_asset_count} renewal asset lineages contain more than one certificate.",
+            f"- {normal_reissuance_assets} of those renewal asset lineages show only brief rollover overlap and fit the normal renewal model.",
+            f"- {len(overlap_elevated_rows)} show elevated overlap and {len(overlap_extended_rows)} show extended overlap red flags.",
             f"- {same_cn_same_dn} repeated Subject CN values keep the same Subject DN while rotating serial number, validity span, or SAN profile.",
-            "- That means Subject CN does not behave like a singleton asset key. It behaves more like a service label under which certificates are renewed and sometimes reshaped.",
         ]
     )
     lines.append("")
-    lines.append("This is the baseline that matters before any anomaly analysis. Most service names are not single certificates frozen in time. They are lineages of certificates issued, renewed, and sometimes restructured under the same public hostname.")
+    lines.append("This is the baseline that matters before any anomaly analysis. Most service names are not single certificates frozen in time. They are lineages of certificates issued, renewed, and sometimes restructured under the same public hostname. The key distinction is whether successor and predecessor overlap only briefly, which is normal, or coexist for a long time, which is operationally sloppier and therefore more suspicious.")
     lines.append("")
-    lines.append("## Chapter 2: Same Subject CN, Different Subject DN")
+    if overlap_elevated_rows or overlap_extended_rows:
+        lines.append("### Concurrent-Validity Deviations")
+        lines.append("")
+        lines.extend(
+            md_table(
+                ["Subject CN", "Lineage", "Asset Certs", "Current", "Max Concurrent", "Max Overlap Days", "Class", "Asset Details"],
+                [
+                    [
+                        row.subject_cn,
+                        row.lineage,
+                        str(row.asset_variant_count),
+                        str(row.current_certificate_count),
+                        str(row.max_concurrent),
+                        str(row.max_overlap_days),
+                        row.overlap_class,
+                        row.details,
+                    ]
+                    for row in (overlap_extended_rows[:20] + overlap_elevated_rows[:10])
+                ],
+            )
+        )
+        lines.append("")
+    lines.append("## Chapter 2: Red-Flag Inventory")
+    lines.append("")
+    lines.append("**Management Summary**")
+    lines.append("")
+    lines.extend(
+        [
+            "- The red-flag score is additive. Each category contributes one point, except extended concurrent validity which contributes three because it is closer to outright issuance sloppiness.",
+            "- The categories are: extended or elevated overlap, Subject DN drift, CA lineage drift, and SAN drift.",
+            "- This chapter is the shortest route to the names that deserve deeper manual review.",
+        ]
+    )
+    lines.append("")
+    if red_flag_rows:
+        lines.extend(
+            md_table(
+                ["Subject CN", "Score", "Certs", "Current", "Flags", "Issuer Mix"],
+                [
+                    [
+                        row.subject_cn,
+                        str(row.score),
+                        str(row.certificate_count),
+                        str(row.current_certificate_count),
+                        row.flags,
+                        row.notes,
+                    ]
+                    for row in red_flag_rows[:30]
+                ],
+            )
+        )
+        lines.append("")
+    lines.append("## Chapter 3: Subject DN Drift")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
@@ -605,44 +869,24 @@ def render_markdown(
     else:
         lines.append("No cases were found.")
         lines.append("")
-    lines.append("## Chapter 3: Same Subject CN, Different Issuing CA")
+    lines.append("## Chapter 4: CA Lineage Drift")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
     lines.extend(
         [
             f"- Subject CN values with more than one exact issuer name: {len(issuer_rows)}.",
-            f"- Subject CN values spanning more than one issuer family or vendor: {len(vendor_rows)}.",
-            "- This reveals whether the same service name moved between CA products, CA lineages, or cloud-managed issuance stacks over time.",
+            f"- Subject CN values spanning more than one CA lineage: {len(vendor_rows)}.",
+            "- Exact issuer changes inside one lineage can be operationally normal. CA lineage drift is the stronger signal and therefore the primary red flag here.",
         ]
     )
     lines.append("")
-    if issuer_rows:
-        lines.append("### Exact Issuer Changes")
-        lines.append("")
-        lines.extend(
-            md_table(
-                ["Subject CN", "Certs", "Current", "Distinct Issuers", "Issuer Families", "Issuer Samples"],
-                [
-                    [
-                        row.subject_cn,
-                        str(row.certificate_count),
-                        str(row.current_certificate_count),
-                        str(row.distinct_value_count),
-                        row.issuer_families,
-                        row.details,
-                    ]
-                    for row in issuer_rows[:20]
-                ],
-            )
-        )
-        lines.append("")
     if vendor_rows:
-        lines.append("### Vendor-Level Changes")
+        lines.append("### CA Lineage Changes")
         lines.append("")
         lines.extend(
             md_table(
-                ["Subject CN", "Certs", "Current", "Distinct Vendors", "Vendor Mix", "Vendors Seen"],
+                ["Subject CN", "Certs", "Current", "Distinct Lineages", "Lineage Mix", "Lineages Seen"],
                 [
                     [
                         row.subject_cn,
@@ -657,7 +901,27 @@ def render_markdown(
             )
         )
         lines.append("")
-    lines.append("## Chapter 4: Same Subject CN, Different SAN Profiles")
+    if issuer_rows:
+        lines.append("### Exact Issuer Changes Inside Or Across Lineages")
+        lines.append("")
+        lines.extend(
+            md_table(
+                ["Subject CN", "Certs", "Current", "Distinct Issuers", "Lineage Mix", "Issuer Samples"],
+                [
+                    [
+                        row.subject_cn,
+                        str(row.certificate_count),
+                        str(row.current_certificate_count),
+                        str(row.distinct_value_count),
+                        row.issuer_families,
+                        row.details,
+                    ]
+                    for row in issuer_rows[:20]
+                ],
+            )
+        )
+        lines.append("")
+    lines.append("## Chapter 5: SAN Profile Drift")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
@@ -698,7 +962,7 @@ def render_markdown(
             )
         )
         lines.append("")
-    lines.append("## Chapter 5: Historic Issuance Bursts And Step Changes")
+    lines.append("## Chapter 6: Historic Issuance Bursts And Step Changes")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
@@ -741,9 +1005,9 @@ def render_markdown(
     else:
         lines.append("No step weeks met the configured threshold.")
         lines.append("")
-    lines.append("## Chapter 6: Interpretation")
+    lines.append("## Chapter 7: Interpretation")
     lines.append("")
-    lines.append("The main operational picture is not one of single certificates mapped one-to-one to service names. It is a layered certificate lineage model. Some Subject CN values are stable and renewed under the same subject identity. Others migrate across issuer families, reshape their SAN surface, or move in bulk issuance campaigns. That matters because the public certificate view is not just a static inventory. It is a change log of service ownership, CA strategy, and platform rollout over time.")
+    lines.append("The main operational picture is not one of single certificates mapped one-to-one to service names. It is a layered certificate lineage model. The normal case is brief rollover inside a stable renewal asset lineage. The red flags are the exceptions layered on top of that baseline: long concurrent validity, Subject DN drift, CA lineage drift, and SAN drift. Historic issuance bursts matter because they show when those changes happened in bulk rather than one certificate at a time.")
     lines.append("")
     args.markdown_output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -757,6 +1021,10 @@ def render_latex(
     vendor_rows: list[CnCollisionRow],
     san_rows: list[SanChangeRow],
     san_pattern_counts: Counter[str],
+    overlap_elevated_rows: list[OverlapRow],
+    overlap_extended_rows: list[OverlapRow],
+    normal_reissuance_assets: int,
+    red_flag_rows: list[RedFlagRow],
     day_rows: list[StartDayRow],
     week_rows: list[StepWeekRow],
 ) -> None:
@@ -765,6 +1033,7 @@ def render_latex(
     cn_groups = group_by_subject_cn(certificates)
     repeated_cn_count = sum(1 for values in cn_groups.values() if len(values) > 1)
     same_cn_same_dn = sum(1 for values in cn_groups.values() if len(values) > 1 and len({item.subject_dn for item in values}) == 1)
+    renewal_asset_count = normal_reissuance_assets + len(overlap_elevated_rows) + len(overlap_extended_rows)
 
     lines: list[str] = [
         r"\documentclass[11pt]{article}",
@@ -833,10 +1102,12 @@ def render_latex(
             f"Currently valid subset inside that historical corpus: {current_count}.",
             f"Distinct Subject CN values: {len(cn_groups)}.",
             f"Subject CN values with more than one certificate over time: {repeated_cn_count}.",
+            f"Normal brief-rollover renewal asset lineages: {normal_reissuance_assets}.",
+            f"Extended-overlap red-flag asset lineages: {len(overlap_extended_rows)}.",
         ]
     )
     lines.append(
-        r"This report treats Subject CN as a hostname label, not as a unique asset key. The goal is to observe how certificate lineages evolve over time across renewals, issuer changes, SAN changes, and issuance bursts."
+        r"This report treats Subject CN as a hostname label, not as a unique asset key. The goal is to observe how certificate lineages evolve over time across renewals, issuer changes, SAN changes, and issuance bursts, while separating normal rollover from genuine red flags."
     )
 
     lines.append(r"\section{Reading Notes}")
@@ -845,21 +1116,66 @@ def render_latex(
         "Subject CN is the hostname placed in the certificate's Common Name field.",
         "Subject DN is the full subject identity string, not just the hostname.",
         "SAN profile means the complete set of SAN entries carried by a certificate.",
-        "Issuer family collapses exact issuer names into vendor-level families such as Amazon, Sectigo, COMODO, and Google Trust Services.",
+        "CA lineage collapses exact issuer names into vendor-level families. Legacy COMODO and Sectigo are treated as one lineage here: Sectigo/COMODO.",
+        "A renewal asset lineage means the same Subject CN, same Subject DN, same SAN profile, and same CA lineage reissued over time.",
+        "Overlap thresholds used here are 0 to 14 days for brief rollover, 15 to 45 days for elevated overlap, and more than 45 days for extended-overlap red flags.",
     ]:
         lines.append(rf"\item {ct_scan.latex_escape(item)}")
     lines.append(r"\end{itemize}")
 
-    lines.append(r"\section{Reissuance Is The Rule, Not The Exception}")
+    lines.append(r"\section{Normal Renewal Versus Concurrent Validity}")
     add_summary(
         [
             f"{repeated_cn_count} of {len(cn_groups)} Subject CN values have more than one certificate across the historical corpus.",
+            f"{renewal_asset_count} renewal asset lineages contain more than one certificate.",
+            f"{normal_reissuance_assets} of those renewal asset lineages show only brief rollover overlap and fit the normal renewal model.",
+            f"{len(overlap_elevated_rows)} show elevated overlap and {len(overlap_extended_rows)} show extended overlap red flags.",
             f"{same_cn_same_dn} repeated Subject CN values keep the same Subject DN while rotating serial number, validity span, or SAN profile.",
-            "Subject CN behaves more like a service label than a singleton certificate asset key.",
         ]
     )
+    lines.append(
+        r"The baseline is ordinary certificate rollover: successor and predecessor overlap briefly while deployment is switched over. The red flag is not reissuance itself, but long-lived concurrent validity for what otherwise looks like the same renewal asset lineage."
+    )
+    if overlap_elevated_rows or overlap_extended_rows:
+        lines.append(r"\subsection{Concurrent-Validity Deviations}")
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.14\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.13\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth}}",
+                r"\toprule",
+                r"Subject CN & Lineage & Asset Certs & Current & Max Concurrent & Max Overlap Days & Class & Asset Details \\",
+                r"\midrule",
+            ]
+        )
+        for row in (overlap_extended_rows[:20] + overlap_elevated_rows[:10]):
+            lines.append(
+                rf"{ct_scan.latex_escape(row.subject_cn)} & {ct_scan.latex_escape(row.lineage)} & {row.asset_variant_count} & {row.current_certificate_count} & {row.max_concurrent} & {row.max_overlap_days} & {ct_scan.latex_escape(row.overlap_class)} & {ct_scan.latex_escape(row.details)} \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
 
-    lines.append(r"\section{Same Subject CN, Different Subject DN}")
+    lines.append(r"\section{Red-Flag Inventory}")
+    add_summary(
+        [
+            "The red-flag score is additive.",
+            "Each category contributes one point, except extended concurrent validity which contributes three because it is closer to outright issuance sloppiness.",
+            "The categories are overlap deviation, Subject DN drift, CA lineage drift, and SAN drift.",
+        ]
+    )
+    if red_flag_rows:
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedright\arraybackslash}p{0.30\linewidth} >{\raggedright\arraybackslash}p{0.26\linewidth}}",
+                r"\toprule",
+                r"Subject CN & Score & Certs & Current & Flags & Issuer Mix \\",
+                r"\midrule",
+            ]
+        )
+        for row in red_flag_rows[:30]:
+            lines.append(
+                rf"{ct_scan.latex_escape(row.subject_cn)} & {row.score} & {row.certificate_count} & {row.current_certificate_count} & {ct_scan.latex_escape(row.flags)} & {ct_scan.latex_escape(row.notes)} \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+
+    lines.append(r"\section{Subject DN Drift}")
     add_summary(
         [
             f"Subject CN values with more than one Subject DN: {len(dn_rows)}.",
@@ -884,36 +1200,21 @@ def render_latex(
     else:
         lines.append(r"No cases were found.")
 
-    lines.append(r"\section{Same Subject CN, Different Issuing CA}")
+    lines.append(r"\section{CA Lineage Drift}")
     add_summary(
         [
             f"Subject CN values with more than one exact issuer name: {len(issuer_rows)}.",
-            f"Subject CN values spanning more than one issuer family or vendor: {len(vendor_rows)}.",
-            "This reveals hostname continuity across CA product changes or vendor changes.",
+            f"Subject CN values spanning more than one CA lineage: {len(vendor_rows)}.",
+            "Exact issuer changes inside one lineage can be operationally normal. CA lineage drift is the stronger signal and therefore the primary red flag here.",
         ]
     )
-    if issuer_rows:
-        lines.append(r"\subsection{Exact Issuer Changes}")
-        lines.extend(
-            [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.32\linewidth}}",
-                r"\toprule",
-                r"Subject CN & Certs & Current & Distinct Issuers & Issuer Families & Issuer Samples \\",
-                r"\midrule",
-            ]
-        )
-        for row in issuer_rows[:20]:
-            lines.append(
-                rf"{ct_scan.latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_value_count} & {ct_scan.latex_escape(row.issuer_families)} & {ct_scan.latex_escape(row.details)} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     if vendor_rows:
-        lines.append(r"\subsection{Vendor-Level Changes}")
+        lines.append(r"\subsection{CA Lineage Changes}")
         lines.extend(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.32\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Certs & Current & Distinct Vendors & Vendor Mix & Vendors Seen \\",
+                r"Subject CN & Certs & Current & Distinct Lineages & Lineage Mix & Lineages Seen \\",
                 r"\midrule",
             ]
         )
@@ -922,8 +1223,23 @@ def render_latex(
                 rf"{ct_scan.latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_value_count} & {ct_scan.latex_escape(row.issuer_families)} & {ct_scan.latex_escape(row.details)} \\"
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
+    if issuer_rows:
+        lines.append(r"\subsection{Exact Issuer Changes Inside Or Across Lineages}")
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.32\linewidth}}",
+                r"\toprule",
+                r"Subject CN & Certs & Current & Distinct Issuers & Lineage Mix & Issuer Samples \\",
+                r"\midrule",
+            ]
+        )
+        for row in issuer_rows[:20]:
+            lines.append(
+                rf"{ct_scan.latex_escape(row.subject_cn)} & {row.certificate_count} & {row.current_certificate_count} & {row.distinct_value_count} & {ct_scan.latex_escape(row.issuer_families)} & {ct_scan.latex_escape(row.details)} \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
 
-    lines.append(r"\section{Same Subject CN, Different SAN Profiles}")
+    lines.append(r"\section{SAN Profile Drift}")
     add_summary(
         [
             f"Subject CN values with more than one SAN profile: {len(san_rows)}.",
@@ -988,7 +1304,7 @@ def render_latex(
 
     lines.append(r"\section{Interpretation}")
     lines.append(
-        r"The public certificate view is not just a static inventory. It is a change log. Stable Subject CN values can sit on top of several successive certificates, several SAN shapes, and sometimes several issuer families. That matters because the observable certificate surface reflects renewal operations, migration waves, and platform strategy over time."
+        r"The public certificate view is not just a static inventory. It is a change log. The normal case is brief rollover inside a stable renewal asset lineage. The red flags are the exceptions layered on top of that baseline: long concurrent validity, Subject DN drift, CA lineage drift, and SAN drift. Historic issuance bursts matter because they show when those changes happened in bulk rather than one certificate at a time."
     )
     lines.extend([r"\end{document}"])
     args.latex_output.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -1002,6 +1318,15 @@ def main() -> int:
     dn_rows = dn_change_rows(cn_groups)
     issuer_rows, vendor_rows = issuer_change_rows(cn_groups)
     san_rows, san_pattern_counts = san_change_rows(cn_groups)
+    overlap_elevated_rows, overlap_extended_rows, normal_reissuance_assets = overlap_rows(cn_groups)
+    red_flag_rows = build_red_flag_rows(
+        cn_groups,
+        dn_rows,
+        vendor_rows,
+        san_rows,
+        overlap_extended_rows,
+        overlap_elevated_rows,
+    )
     day_rows = top_start_days(certificates)
     week_rows = spike_weeks(certificates)
     render_markdown(
@@ -1013,6 +1338,10 @@ def main() -> int:
         vendor_rows,
         san_rows,
         san_pattern_counts,
+        overlap_elevated_rows,
+        overlap_extended_rows,
+        normal_reissuance_assets,
+        red_flag_rows,
         day_rows,
         week_rows,
     )
@@ -1025,6 +1354,10 @@ def main() -> int:
         vendor_rows,
         san_rows,
         san_pattern_counts,
+        overlap_elevated_rows,
+        overlap_extended_rows,
+        normal_reissuance_assets,
+        red_flag_rows,
         day_rows,
         week_rows,
     )
