@@ -4,6 +4,7 @@ DOMAINS ?= domains.local.txt
 FOCUS_SUBJECTS ?= focus_subjects.local.txt
 CACHE_TTL ?= 0
 DNS_CACHE_TTL ?= 86400
+CAA_CACHE_TTL ?= 86400
 MAX_CANDIDATES ?= 10000
 
 .PHONY: bootstrap install init-config inventory purpose lineage consolidated monograph all
@@ -60,6 +61,7 @@ monograph:
 		--focus-subjects-file $(FOCUS_SUBJECTS) \
 		--cache-ttl-seconds $(CACHE_TTL) \
 		--dns-cache-ttl-seconds $(DNS_CACHE_TTL) \
+		--caa-cache-ttl-seconds $(CAA_CACHE_TTL) \
 		--max-candidates-per-domain $(MAX_CANDIDATES) \
 		--markdown-output output/corpus/monograph.md \
 		--latex-output output/corpus/monograph.tex \

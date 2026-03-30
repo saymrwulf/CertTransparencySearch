@@ -6,6 +6,7 @@ This project builds a publication-grade monograph from Certificate Transparency 
 - it verifies locally that the certificates are real leaf certificates rather than CA certificates or precertificates
 - it assesses intended usage from EKU and KeyUsage
 - it scans the DNS names exposed by the SAN corpus
+- it evaluates the effective CAA policy for those DNS names to show where public CA issuance is governed, delegated, or unrestricted
 - it can analyse a second local-only Subject-CN cohort file against the wider estate
 - it produces one primary readable output set: a monograph in Markdown, LaTeX, and PDF
 
@@ -32,7 +33,7 @@ None of those paths should be committed.
 
 - `python3`: runs the scanners and report generators
 - `make`: gives you short repeatable commands instead of long manual command lines
-- `dig`: performs the live DNS scan
+- `dig`: performs the live DNS and CAA scans
 - `xelatex`: compiles the PDF reports
 
 If `xelatex` is missing, the Markdown and LaTeX outputs can still be generated, but the PDF targets will fail.
@@ -162,18 +163,20 @@ The default `Makefile` values are:
 - `FOCUS_SUBJECTS=focus_subjects.local.txt`
 - `CACHE_TTL=0`
 - `DNS_CACHE_TTL=86400`
+- `CAA_CACHE_TTL=86400`
 - `MAX_CANDIDATES=10000`
 
 This means:
 
 - Certificate Transparency is refreshed live on every normal run.
 - DNS results are reused for up to one day unless you override the DNS cache TTL.
+- CAA results are reused for up to one day unless you override the CAA cache TTL.
 - The query cap is high enough for the current corpus and the scanner will refuse to run if the live raw match count exceeds the cap.
 
 If you want to override values:
 
 ```bash
-make monograph CACHE_TTL=86400 DNS_CACHE_TTL=86400
+make monograph CACHE_TTL=86400 DNS_CACHE_TTL=86400 CAA_CACHE_TTL=86400
 ```
 
 Or:
@@ -250,6 +253,7 @@ This is only needed if you want the raw family inventory outside the monograph:
   --focus-subjects-file focus_subjects.local.txt \
   --cache-ttl-seconds 0 \
   --dns-cache-ttl-seconds 86400 \
+  --caa-cache-ttl-seconds 86400 \
   --max-candidates-per-domain 10000 \
   --markdown-output output/corpus/monograph.md \
   --latex-output output/corpus/monograph.tex \
@@ -262,6 +266,7 @@ This is only needed if you want the raw family inventory outside the monograph:
 - `ct_usage_assessment.py`: EKU and KeyUsage assessment
 - `ct_lineage_report.py`: historical Subject CN, Subject DN, issuer, SAN, and issuance-burst analysis
 - `ct_dns_utils.py`: DNS scanning and provider-signature logic
+- `ct_caa_analysis.py`: CAA discovery, caching, and issuance-policy analysis
 - `ct_master_report.py`: shorter consolidated report
 - `ct_monograph_report.py`: publication-grade monograph with embedded appendices
 - `Makefile`: reproducible operator workflow

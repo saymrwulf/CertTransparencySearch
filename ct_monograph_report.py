@@ -6,6 +6,7 @@ import argparse
 from collections import Counter
 from pathlib import Path
 
+import ct_caa_analysis
 import ct_dns_utils
 import ct_focus_subjects
 import ct_lineage_report
@@ -20,10 +21,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--domains-file", type=Path, default=Path("domains.local.txt"))
     parser.add_argument("--cache-dir", type=Path, default=Path(".cache/ct-search"))
     parser.add_argument("--dns-cache-dir", type=Path, default=Path(".cache/dns-scan"))
+    parser.add_argument("--caa-cache-dir", type=Path, default=Path(".cache/caa-scan"))
     parser.add_argument("--history-cache-dir", type=Path, default=Path(".cache/ct-history-v2"))
     parser.add_argument("--focus-subjects-file", type=Path, default=Path("focus_subjects.local.txt"))
     parser.add_argument("--cache-ttl-seconds", type=int, default=0)
     parser.add_argument("--dns-cache-ttl-seconds", type=int, default=86400)
+    parser.add_argument("--caa-cache-ttl-seconds", type=int, default=86400)
     parser.add_argument("--max-candidates-per-domain", type=int, default=10000)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--markdown-output", type=Path, default=Path("output/corpus/monograph.md"))
@@ -239,6 +242,130 @@ def overlap_signal(details: str) -> str:
     return truncate_text("; ".join(parts) if parts else details, 108)
 
 
+def caa_source_label(source_kind: str) -> str:
+    return {
+        "exact": "Exact-name CAA",
+        "alias_target": "Alias-target CAA",
+        "parent": "Inherited parent CAA",
+        "parent_alias_target": "Inherited parent CAA reached through alias following",
+        "none": "No CAA found",
+    }.get(source_kind, source_kind)
+
+
+def caa_policy_label(families: tuple[str, ...]) -> str:
+    if families == ("UNRESTRICTED",):
+        return "No published CAA restriction"
+    if families == ("Amazon",):
+        return "Amazon-only issuance policy"
+    if families == ("DigiCert/QuoVadis", "Sectigo/COMODO"):
+        return "Corporate broad policy"
+    if families == ("Amazon", "DigiCert/QuoVadis", "Sectigo/COMODO"):
+        return "Mixed corporate-plus-Amazon policy"
+    if families == ("Google Trust Services", "Sectigo/COMODO"):
+        return "Google plus Sectigo policy"
+    if "Let's Encrypt" in families or "Telia" in families:
+        return "Vendor-delegated broad policy"
+    return "Mixed named policy"
+
+
+def caa_policy_explanation(families: tuple[str, ...]) -> str:
+    if families == ("UNRESTRICTED",):
+        return "No CAA restriction is published, so WebPKI issuance is not limited by DNS policy."
+    if families == ("Amazon",):
+        return "Only Amazon Trust Services identifiers are authorized by DNS policy."
+    if families == ("DigiCert/QuoVadis", "Sectigo/COMODO"):
+        return "The name inherits the broad corporate policy that permits the main non-Amazon public CA families seen in this estate."
+    if families == ("Amazon", "DigiCert/QuoVadis", "Sectigo/COMODO"):
+        return "The name permits both the broad corporate CA set and Amazon Trust Services."
+    if families == ("Google Trust Services", "Sectigo/COMODO"):
+        return "This is a narrow exception that permits Google Trust Services alongside the Sectigo lineage."
+    if "Let's Encrypt" in families or "Telia" in families:
+        return "The allowed CA set is wider and looks delegated to a specialist external platform or vendor."
+    return "The DNS policy allows a mixed set of public CA families."
+
+
+def service_anchor_label(name: str, zone: str) -> str:
+    if zone == "other":
+        return name
+    if name == zone:
+        return zone
+    relative = name[: -(len(zone) + 1)]
+    parts = relative.split(".")
+    if not parts:
+        return zone
+    return parts[-1]
+
+
+def caa_zone_policy_rows(
+    analysis: ct_caa_analysis.CaaAnalysis,
+    zone: str,
+) -> list[list[str]]:
+    rows = ct_caa_analysis.rows_for_zone(analysis, zone)
+    policy_counts = ct_caa_analysis.policy_counter(rows)
+    return [
+        [
+            caa_policy_label(policy),
+            str(count),
+            caa_policy_explanation(policy),
+        ]
+        for policy, count in policy_counts.most_common()
+    ]
+
+
+def caa_source_rows(analysis: ct_caa_analysis.CaaAnalysis) -> list[list[str]]:
+    return [
+        [
+            caa_source_label(source_kind),
+            str(count),
+            {
+                "exact": "The queried DNS name itself published the effective CAA.",
+                "alias_target": "The queried DNS name resolved through an alias and the effective CAA came from what that alias chain exposed.",
+                "parent": "The leaf name had no CAA, so issuance policy was inherited from a parent DNS node.",
+                "parent_alias_target": "The leaf name inherited from a parent DNS node, and that parent policy was itself exposed through an alias response.",
+                "none": "No effective CAA was found at the name or its parents.",
+            }.get(source_kind, "CAA discovery result."),
+        ]
+        for source_kind, count in analysis.source_kind_counts.most_common()
+    ]
+
+
+def top_caa_overlap_rows(analysis: ct_caa_analysis.CaaAnalysis, limit: int = 15) -> list[list[str]]:
+    rows = [row for row in analysis.rows if row.current_multi_family_overlap]
+    ordered = sorted(rows, key=lambda row: (row.zone, service_anchor_label(row.name, row.zone), row.name))
+    return [
+        [
+            row.name,
+            row.zone,
+            ", ".join(row.current_covering_families),
+            truncate_text(", ".join(row.current_covering_subject_cns), 72),
+        ]
+        for row in ordered[:limit]
+    ]
+
+
+def top_caa_mismatch_rows(analysis: ct_caa_analysis.CaaAnalysis, limit: int = 15) -> list[list[str]]:
+    rows = [row for row in analysis.rows if row.current_policy_mismatch]
+    ordered = sorted(rows, key=lambda row: (row.zone, service_anchor_label(row.name, row.zone), row.name))
+    return [
+        [
+            row.name,
+            row.zone,
+            ", ".join(row.current_covering_families),
+            ", ".join(row.allowed_ca_families) or "UNRESTRICTED",
+            caa_source_label(row.source_kind),
+        ]
+        for row in ordered[:limit]
+    ]
+
+
+def caa_concentration_text(analysis: ct_caa_analysis.CaaAnalysis, zone: str) -> str:
+    rows = [row for row in ct_caa_analysis.rows_for_zone(analysis, zone) if row.current_policy_mismatch or row.current_multi_family_overlap]
+    if not rows:
+        return "none"
+    counts = Counter(service_anchor_label(row.name, zone) for row in rows)
+    return ", ".join(f"{label} ({count})" for label, count in counts.most_common(6))
+
+
 def focus_comparison_rows(focus_analysis: ct_focus_subjects.FocusCohortAnalysis) -> list[list[str]]:
     return [
         [
@@ -447,6 +574,7 @@ def render_markdown(
     args: argparse.Namespace,
     report: dict[str, object],
     assessment: ct_lineage_report.HistoricalAssessment,
+    caa_analysis: ct_caa_analysis.CaaAnalysis,
     focus_analysis: ct_focus_subjects.FocusCohortAnalysis | None,
 ) -> None:
     args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
@@ -540,9 +668,17 @@ def render_markdown(
     focus_bucket_summary = focus_bucket_summary_rows(focus_analysis) if focus_analysis else []
     focus_representatives = focus_representative_rows(focus_analysis) if focus_analysis else []
     has_focus = focus_analysis is not None
-    synthesis_chapter = 8 if has_focus else 7
-    limits_chapter = 9 if has_focus else 8
-    detailed_inventory_appendix = "D" if has_focus else "C"
+    caa_zone_rows = {
+        zone: caa_zone_policy_rows(caa_analysis, zone)
+        for zone in caa_analysis.configured_domains
+    }
+    primary_zone = report["domains"][0] if report["domains"] else "configured primary zone"
+    secondary_zone = report["domains"][1] if len(report["domains"]) > 1 else None
+    synthesis_chapter = 9 if has_focus else 8
+    limits_chapter = 10 if has_focus else 9
+    caa_appendix = "C"
+    focus_appendix = "D" if has_focus else None
+    detailed_inventory_appendix = "E" if has_focus else "D"
     lines: list[str] = []
     lines.append("# CT and DNS Monograph")
     lines.append("")
@@ -558,7 +694,8 @@ def render_markdown(
             f"- **{purpose_summary.category_counts.get('tls_server_only', 0)}** certificates are ordinary public TLS server certificates, while **{purpose_summary.category_counts.get('tls_server_and_client', 0)}** come from templates that also permit client-certificate use.",
             f"- **{historical_count}** historical leaf certificates show how these names evolved over time, including expired renewal history.",
             f"- **{len(report['unique_dns_names'])}** unique DNS SAN names were scanned live.",
-            "- The estate is best understood as several layers laid on top of one another: brand naming, service naming, platform naming, delivery-stack naming, and migration residue.",
+            f"- **{caa_analysis.total_names}** DNS names were also assessed for effective CAA policy, revealing where issuance is centrally governed, delegated, or left unrestricted.",
+            "- The estate is best understood as several layers laid on top of one another: brand naming, service naming, platform naming, delivery-stack naming, issuance-policy control, and migration residue.",
         ]
     )
     lines.append("")
@@ -570,8 +707,9 @@ def render_markdown(
             "- Read Chapters 2 and 3 if you want the current certificate-side story: issuers, trust, and purpose.",
             "- Read Chapter 4 if you want the historical lifecycle view and the red flags split into current versus fixed-in-the-past.",
             "- Read Chapters 5 and 6 if you want the naming and DNS story.",
+            "- Read Chapter 7 if you want the issuance-policy view: which public CAs are authorized by DNS and where that control is absent, inherited, or delegated.",
             *(
-                ["- Read Chapter 7 if you want the focused Subject-CN cohort analysis and why that subset behaves differently from the wider estate."]
+                ["- Read Chapter 8 if you want the focused Subject-CN cohort analysis and why that subset behaves differently from the wider estate."]
                 if has_focus
                 else []
             ),
@@ -886,8 +1024,83 @@ def render_markdown(
     lines.append("")
     lines.append("The glossary terms above are the building blocks used in the DNS-outcome table. This is also why the management summary mentions Adobe Campaign, CloudFront, Apigee, and Pega at all: not because brand names are the point, but because those names reveal what kind of public delivery role a hostname is landing on. CloudFront suggests a distribution edge, Apigee suggests managed API exposure, Adobe Campaign suggests a marketing or communications front, and a load balancer suggests traffic distribution to backend services.")
     lines.append("")
+    lines.append("The next chapter keeps the same names in view but asks a different question: not where the names land, but which public CA families DNS currently authorizes to issue for them.")
+    lines.append("")
+    lines.append("## Chapter 7: DNS Issuance Policy Control (CAA)")
+    lines.append("")
+    lines.append("**Management Summary**")
+    lines.append("")
+    for zone in caa_analysis.configured_domains:
+        zone_rows = ct_caa_analysis.rows_for_zone(caa_analysis, zone)
+        unrestricted_count = sum(1 for row in zone_rows if not row.allowed_ca_families)
+        mismatch_count = sum(1 for row in zone_rows if row.current_policy_mismatch)
+        overlap_count = sum(1 for row in zone_rows if row.current_multi_family_overlap)
+        dominant_policy = ct_caa_analysis.policy_counter(zone_rows).most_common(1)
+        dominant_label = caa_policy_label(dominant_policy[0][0]) if dominant_policy else "none"
+        lines.append(
+            f"- `{zone}`: {len(zone_rows)} names in scope; dominant policy is {dominant_label}; unrestricted names={unrestricted_count}; current policy-mismatch names={mismatch_count}; current multi-family overlap names={overlap_count}."
+        )
+    lines.extend(
+        [
+            f"- Effective CAA discovery paths across all names: {', '.join(f'{caa_source_label(kind)}={count}' for kind, count in caa_analysis.source_kind_counts.most_common())}.",
+            f"- Current names simultaneously covered by more than one live CA family: {len(caa_analysis.multi_family_overlap_names)}.",
+            f"- Current names whose live certificate family does not match today's published CAA policy: {len(caa_analysis.policy_mismatch_names)}.",
+        ]
+    )
+    lines.append("")
+    lines.append("CAA is the DNS control layer for public certificate issuance. It does not validate a certificate after issuance; instead, it tells a public CA which CA families are authorized to issue for a DNS name if any restriction is published at all. If no CAA is published, WebPKI issuance is unrestricted from the DNS-policy point of view.")
+    lines.append("")
+    lines.append("This chapter adds the missing control dimension to the earlier chapters. The certificate chapter showed who actually issued. The DNS chapter showed where the names land. The CAA chapter shows which issuers are supposed to be allowed by DNS policy.")
+    lines.append("")
+    lines.append("CAA is checked per DNS name requested in the certificate, not per Subject DN and not per organisational story. A Subject CN can therefore shift between different Subject DN values without creating a CAA clash, because CAA ignores organisation fields and looks only at the DNS names being certified.")
+    lines.append("")
+    lines.append("### How To Read The CAA Results")
+    lines.append("")
+    lines.extend(md_table(["CAA Discovery Result", "Names", "Meaning"], caa_source_rows(caa_analysis)))
+    lines.append("")
+    lines.append("The key distinction is between ordinary parent inheritance and alias-target-derived policy. Parent inheritance means the leaf name simply relies on a policy published higher in its own DNS tree. Alias-target-derived policy means the effective CAA surfaced through an alias response. In this corpus, that often marks a managed rail or specialist external platform rather than a plain brand-front hostname.")
+    lines.append("")
+    lines.append("### Policy Regimes By Configured Zone")
+    lines.append("")
+    for zone in caa_analysis.configured_domains:
+        lines.append(f"#### `{zone}`")
+        lines.append("")
+        lines.extend(md_table(["Policy Regime", "Names", "Plain-Language Meaning"], caa_zone_rows[zone]))
+        lines.append("")
+    if secondary_zone:
+        lines.append(f"The contrast between `{primary_zone}` and `{secondary_zone}` is one of the strongest PKI-governance findings in the corpus. `{primary_zone}` is policy-layered and governed, while `{secondary_zone}` is currently CAA-empty in the scanned name set. That does not make `{secondary_zone}` invalid, but it does mean DNS is not constraining public CA choice there.")
+        lines.append("")
+    lines.append("### What The CAA Layer Does To The Earlier Thesis")
+    lines.append("")
+    lines.extend(
+        [
+            "- The CAA layer strengthens the earlier certificate-and-DNS thesis rather than overturning it. The same service families that already looked like shared managed rails from naming and DNS often sit under narrower issuance policy as well.",
+            f"- In `{primary_zone}`, the current CAA friction is concentrated rather than diffuse: {caa_concentration_text(caa_analysis, primary_zone)}.",
+            "- Broad corporate default policy remains visible on many ordinary brand-facing names. That supports the earlier reading that not every public hostname was moved onto one tightly managed delivery rail.",
+            "- Vendor-style exceptions still exist. Where a name resolves through a specialist external platform and the allowed CA set widens or changes shape, the policy layer supports the earlier vendor-delegation reading rather than contradicting it.",
+        ]
+    )
+    lines.append("")
+    lines.append("### Current Multi-Family Overlap")
+    lines.append("")
+    if caa_analysis.multi_family_overlap_names:
+        lines.extend(md_table(["DNS Name", "Zone", "Live CA Families", "Covering Subject CNs"], top_caa_overlap_rows(caa_analysis)))
+    else:
+        lines.append("No current multi-family overlap names were found.")
+    lines.append("")
+    lines.append("These overlap names are operationally important. They show where the same public DNS name is currently covered by more than one live CA family at once. In this corpus, that behavior clusters tightly in a few service families rather than being spread randomly across the estate.")
+    lines.append("")
+    lines.append("### Current Policy Mismatch")
+    lines.append("")
+    if caa_analysis.policy_mismatch_names:
+        lines.extend(md_table(["DNS Name", "Zone", "Live CA Families", "CAA-Allowed Families", "CAA Discovery Result"], top_caa_mismatch_rows(caa_analysis)))
+    else:
+        lines.append("No current policy-mismatch names were found.")
+    lines.append("")
+    lines.append("A current policy mismatch does not automatically prove CA misissuance. CAA only proves what DNS authorizes now. Certificates can remain valid after the DNS-side policy has changed, so the right reading here is current policy lag or migration residue unless the historical issuance-time DNS can also be shown.")
+    lines.append("")
     if focus_analysis:
-        lines.append("## Chapter 7: Focused Subject-CN Cohort")
+        lines.append("## Chapter 8: Focused Subject-CN Cohort")
         lines.append("")
         lines.append("**Management Summary**")
         lines.append("")
@@ -965,16 +1178,16 @@ def render_markdown(
     lines.append("")
     lines.extend(
         [
-            "- The certificate layer and the DNS layer are not two separate stories. They are two views of the same operating estate.",
+            "- The certificate, DNS, and CAA layers are not three separate stories. They are three views of the same operating estate.",
             "- Clean public brand names usually sit closest to the customer surface.",
-            "- Dense SAN sets, numbered families, and multi-zone certificates usually expose the underlying shared service rails and platform layer.",
-            "- The overall shape is more consistent with a federated operating model than with random hostname sprawl.",
+            "- Dense SAN sets, numbered families, multi-zone certificates, and narrower CAA policy usually expose the underlying shared service rails and platform layer.",
+            "- The overall shape is more consistent with a federated operating model with uneven governance maturity than with random hostname sprawl.",
         ]
     )
     lines.append("")
-    lines.append("The common ground is operational reality. A branded proposition wants recognisable names. A service team wants a stable endpoint namespace. A platform team wants shared rails and repeatable delivery machinery. A hosting team wants routable front doors that can land on cloud distribution, gateways, or workflow platforms. The certificates and the DNS tell the same story from different angles.")
+    lines.append("The common ground is operational reality. A branded proposition wants recognisable names. A service team wants a stable endpoint namespace. A platform team wants shared rails and repeatable delivery machinery. A hosting team wants routable front doors that can land on cloud distribution, gateways, or workflow platforms. A security or PKI function wants some names tightly governed and other names left broad or delegated. Certificates, DNS, and CAA tell the same estate story from different angles.")
     lines.append("")
-    lines.append("This is why the estate can look both tidy and messy at once. It is tidy within each layer, but messy across layers because the layers are solving different problems.")
+    lines.append("This is why the estate can look both tidy and messy at once. It is tidy within each layer, but messy across layers because the layers are solving different problems. The new CAA evidence sharpens that point rather than contradicting it: the managed rail families are not only named and hosted differently, they are often policy-controlled differently as well. The biggest qualification is that governance is uneven. The primary configured zone shows layered issuance control, while another configured zone remains CAA-empty. That is not random chaos, but it is also not uniform control maturity.")
     lines.append("")
     lines.append(f"## Chapter {limits_chapter}: Limits, Confidence, and Noise")
     lines.append("")
@@ -982,14 +1195,15 @@ def render_markdown(
     lines.append("")
     lines.extend(
         [
-            "- High-confidence claims are the ones tied directly to observable certificate fields, DNS answers, and trust records.",
+            "- High-confidence claims are the ones tied directly to observable certificate fields, DNS answers, trust records, and current CAA policy.",
             "- Medium-confidence claims are organisational readings drawn from repeated technical patterns.",
             "- Lower-confidence claims are exact expansions of abbreviations or exact internal ownership boundaries.",
             "- Some DNS names do not resolve publicly today; that does not invalidate the certificate-side evidence because certificate and DNS timelines are not identical.",
+            "- A current CAA mismatch does not by itself prove historical CA non-compliance, because DNS policy may have changed after issuance.",
         ]
     )
     lines.append("")
-    lines.append("A useful way to read the corpus is to separate signal from noise. Repeated naming schemas are signal. Repeated DNS outcomes are signal. Which public CA family keeps issuing a name is signal. Simple `www` presence or absence is weak evidence either way unless it coincides with stronger differences such as distinct DNS routing, distinct SAN composition, or a distinct certificate renewal history.")
+    lines.append("A useful way to read the corpus is to separate signal from noise. Repeated naming schemas are signal. Repeated DNS outcomes are signal. Which public CA family keeps issuing a name is signal. Where CAA is broad, narrow, delegated, or absent is signal. Simple `www` presence or absence is weak evidence either way unless it coincides with stronger differences such as distinct DNS routing, distinct SAN composition, a distinct certificate renewal history, or a distinct issuance-policy shape.")
     lines.append("")
     lines.append("## Appendix A: Full Family Catalogue")
     lines.append("")
@@ -1234,15 +1448,44 @@ def render_markdown(
     else:
         lines.append("No step weeks met the threshold.")
     lines.append("")
-    if focus_analysis:
-        lines.append("## Appendix C: Focused Subject-CN Detail")
+    lines.append(f"## Appendix {caa_appendix}: CAA Policy Detail")
+    lines.append("")
+    lines.append("This appendix keeps the issuance-policy evidence inside the monograph. It answers a narrower question than the DNS appendix: not where a name lands, but which public CA families DNS currently authorizes to issue for that name.")
+    lines.append("")
+    lines.append("### C.1 CAA Discovery Paths")
+    lines.append("")
+    lines.extend(md_table(["CAA Discovery Result", "Names", "Meaning"], caa_source_rows(caa_analysis)))
+    lines.append("")
+    lines.append("### C.2 Policy Regimes By Configured Zone")
+    lines.append("")
+    for zone in caa_analysis.configured_domains:
+        lines.append(f"#### `{zone}`")
         lines.append("")
-        lines.append("This appendix keeps the complete focused-cohort table inside the monograph, but it now follows the three-bucket taxonomy from Chapter 7. That makes it easier to read the cohort as a set of related naming traditions instead of as one flat mixed list.")
+        lines.extend(md_table(["Policy Regime", "Names", "Plain-Language Meaning"], caa_zone_rows[zone]))
+        lines.append("")
+    lines.append("### C.3 Current Multi-Family Overlap")
+    lines.append("")
+    if caa_analysis.multi_family_overlap_names:
+        lines.extend(md_table(["DNS Name", "Zone", "Live CA Families", "Covering Subject CNs"], top_caa_overlap_rows(caa_analysis, 40)))
+    else:
+        lines.append("No current multi-family overlap names were found.")
+    lines.append("")
+    lines.append("### C.4 Current Policy Mismatch")
+    lines.append("")
+    if caa_analysis.policy_mismatch_names:
+        lines.extend(md_table(["DNS Name", "Zone", "Live CA Families", "CAA-Allowed Families", "CAA Discovery Result"], top_caa_mismatch_rows(caa_analysis, 40)))
+    else:
+        lines.append("No current policy-mismatch names were found.")
+    lines.append("")
+    if focus_analysis:
+        lines.append(f"## Appendix {focus_appendix}: Focused Subject-CN Detail")
+        lines.append("")
+        lines.append("This appendix keeps the complete focused-cohort table inside the monograph, but it now follows the three-bucket taxonomy from Chapter 8. That makes it easier to read the cohort as a set of related naming traditions instead of as one flat mixed list.")
         lines.append("")
         appendix_buckets = [
-            ("direct_front_door", "### C.1 Front-Door Direct Names"),
-            ("platform_matrix_anchor", "### C.2 Platform-Anchor Matrix Names"),
-            ("ambiguous_legacy", "### C.3 Ambiguous Or Legacy Residue"),
+            ("direct_front_door", "### D.1 Front-Door Direct Names"),
+            ("platform_matrix_anchor", "### D.2 Platform-Anchor Matrix Names"),
+            ("ambiguous_legacy", "### D.3 Ambiguous Or Legacy Residue"),
         ]
         for bucket, heading in appendix_buckets:
             rows = focus_appendix_rows(focus_analysis, bucket)
@@ -1284,6 +1527,7 @@ def render_latex(
     args: argparse.Namespace,
     report: dict[str, object],
     assessment: ct_lineage_report.HistoricalAssessment,
+    caa_analysis: ct_caa_analysis.CaaAnalysis,
     focus_analysis: ct_focus_subjects.FocusCohortAnalysis | None,
 ) -> None:
     args.latex_output.parent.mkdir(parents=True, exist_ok=True)
@@ -1332,6 +1576,12 @@ def render_latex(
     focus_bucket_summary = focus_bucket_summary_rows(focus_analysis) if focus_analysis else []
     focus_representatives = focus_representative_rows(focus_analysis) if focus_analysis else []
     has_focus = focus_analysis is not None
+    caa_zone_rows = {
+        zone: caa_zone_policy_rows(caa_analysis, zone)
+        for zone in caa_analysis.configured_domains
+    }
+    primary_zone = report["domains"][0] if report["domains"] else "configured primary zone"
+    secondary_zone = report["domains"][1] if len(report["domains"]) > 1 else None
     appendix_pdf_path = args.appendix_pdf_output.resolve().as_posix()
     lines: list[str] = [
         r"\documentclass[11pt]{article}",
@@ -1413,7 +1663,8 @@ def render_latex(
             f"{purpose_summary.category_counts.get('tls_server_only', 0)} certificates are ordinary public TLS server certificates, while {purpose_summary.category_counts.get('tls_server_and_client', 0)} come from templates that also permit client-certificate use.",
             f"{historical_count} historical leaf certificates show how the same names evolved over time.",
             f"{len(report['unique_dns_names'])} DNS SAN names were scanned live.",
-            "The estate is best understood as layers of branding, service naming, platform naming, and delivery naming rather than as random clutter.",
+            f"{caa_analysis.total_names} DNS names were also assessed for effective CAA policy, revealing where issuance is centrally governed, delegated, or left unrestricted.",
+            "The estate is best understood as layers of branding, service naming, platform naming, delivery naming, and issuance-policy control rather than as random clutter.",
         ]
     )
     lines.append(
@@ -1428,8 +1679,9 @@ def render_latex(
             "Chapters 2 and 3 explain what the current certificates are and what they are for.",
             "Chapter 4 explains the historical lifecycle and splits red flags into current versus fixed-in-the-past.",
             "Chapters 5 and 6 explain naming and DNS delivery.",
+            "Chapter 7 explains the issuance-policy layer: which public CAs DNS currently authorizes and where DNS imposes no restriction at all.",
             *(
-                ["Chapter 7 explains the focused Subject-CN cohort and why it behaves differently from the wider estate."]
+                ["Chapter 8 explains the focused Subject-CN cohort and why it behaves differently from the wider estate."]
                 if has_focus
                 else []
             ),
@@ -1758,6 +2010,117 @@ def render_latex(
     lines.append(
         r"The glossary terms above are the building blocks used in the DNS-outcome table. This is also why the management summary mentions Adobe Campaign, CloudFront, Apigee, and Pega at all: not because brand names are the point, but because those names reveal what kind of public delivery role a hostname is landing on. CloudFront suggests a distribution edge, Apigee suggests managed API exposure, Adobe Campaign suggests a marketing or communications front, and a load balancer suggests traffic distribution to backend services."
     )
+    lines.append(
+        r"The next chapter keeps the same names in view but asks a different question: not where the names land, but which public CA families DNS currently authorizes to issue for them."
+    )
+
+    lines.append(r"\section{DNS Issuance Policy Control (CAA)}")
+    zone_summary_items: list[str] = []
+    for zone in caa_analysis.configured_domains:
+        zone_rows = ct_caa_analysis.rows_for_zone(caa_analysis, zone)
+        unrestricted_count = sum(1 for row in zone_rows if not row.allowed_ca_families)
+        mismatch_count = sum(1 for row in zone_rows if row.current_policy_mismatch)
+        overlap_count = sum(1 for row in zone_rows if row.current_multi_family_overlap)
+        dominant_policy = ct_caa_analysis.policy_counter(zone_rows).most_common(1)
+        dominant_label = caa_policy_label(dominant_policy[0][0]) if dominant_policy else "none"
+        zone_summary_items.append(
+            f"{zone}: {len(zone_rows)} names in scope; dominant policy is {dominant_label}; unrestricted names={unrestricted_count}; current policy-mismatch names={mismatch_count}; current multi-family overlap names={overlap_count}."
+        )
+    add_summary(
+        zone_summary_items
+        + [
+            f"Effective CAA discovery paths across all names are {', '.join(f'{caa_source_label(kind)}={count}' for kind, count in caa_analysis.source_kind_counts.most_common())}.",
+            f"Current names simultaneously covered by more than one live CA family: {len(caa_analysis.multi_family_overlap_names)}.",
+            f"Current names whose live certificate family does not match today's published CAA policy: {len(caa_analysis.policy_mismatch_names)}.",
+        ]
+    )
+    lines.append(
+        r"CAA is the DNS control layer for public certificate issuance. It does not validate a certificate after issuance; instead, it tells a public CA which CA families are authorized to issue for a DNS name if any restriction is published at all. If no CAA is published, WebPKI issuance is unrestricted from the DNS-policy point of view."
+    )
+    lines.append(
+        r"This chapter adds the missing control dimension to the earlier chapters. The certificate chapter showed who actually issued. The DNS chapter showed where the names land. The CAA chapter shows which issuers are supposed to be allowed by DNS policy."
+    )
+    lines.append(
+        r"CAA is checked per DNS name requested in the certificate, not per Subject DN and not per organisational story. A Subject CN can therefore shift between different Subject DN values without creating a CAA clash, because CAA ignores organisation fields and looks only at the DNS names being certified."
+    )
+    lines.extend(
+        [
+            r"\subsection{How To Read The CAA Results}",
+            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.54\linewidth}}",
+            r"\toprule",
+            r"CAA Discovery Result & Names & Meaning \\",
+            r"\midrule",
+        ]
+    )
+    for label, count, meaning in caa_source_rows(caa_analysis):
+        lines.append(rf"{latex_escape(label)} & {latex_escape(count)} & {latex_escape(meaning)} \\")
+    lines.extend([r"\bottomrule", r"\end{longtable}"])
+    lines.append(
+        r"The key distinction is between ordinary parent inheritance and alias-target-derived policy. Parent inheritance means the leaf name simply relies on a policy published higher in its own DNS tree. Alias-target-derived policy means the effective CAA surfaced through an alias response. In this corpus, that often marks a managed rail or specialist external platform rather than a plain brand-front hostname."
+    )
+    lines.append(r"\subsection{Policy Regimes By Configured Zone}")
+    for zone in caa_analysis.configured_domains:
+        lines.append(rf"\subsubsection{{{latex_escape(zone)}}}")
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.25\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.53\linewidth}}",
+                r"\toprule",
+                r"Policy Regime & Names & Plain-Language Meaning \\",
+                r"\midrule",
+            ]
+        )
+        for regime, count, meaning in caa_zone_rows[zone]:
+            lines.append(rf"{latex_escape(regime)} & {latex_escape(count)} & {latex_escape(meaning)} \\")
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+    if secondary_zone:
+        lines.append(
+            rf"The contrast between \texttt{{{latex_escape(primary_zone)}}} and \texttt{{{latex_escape(secondary_zone)}}} is one of the strongest PKI-governance findings in the corpus. \texttt{{{latex_escape(primary_zone)}}} is policy-layered and governed, while \texttt{{{latex_escape(secondary_zone)}}} is currently CAA-empty in the scanned name set. That does not make \texttt{{{latex_escape(secondary_zone)}}} invalid, but it does mean DNS is not constraining public CA choice there."
+        )
+    lines.extend(
+        [
+            r"\subsection{What The CAA Layer Does To The Earlier Thesis}",
+            r"The CAA layer strengthens the earlier certificate-and-DNS thesis rather than overturning it. The same service families that already looked like shared managed rails from naming and DNS often sit under narrower issuance policy as well.",
+            rf"In \texttt{{{latex_escape(primary_zone)}}}, the current CAA friction is concentrated rather than diffuse: {latex_escape(caa_concentration_text(caa_analysis, primary_zone))}.",
+            r"Broad corporate default policy remains visible on many ordinary brand-facing names. That supports the earlier reading that not every public hostname was moved onto one tightly managed delivery rail.",
+            r"Vendor-style exceptions still exist. Where a name resolves through a specialist external platform and the allowed CA set widens or changes shape, the policy layer supports the earlier vendor-delegation reading rather than contradicting it.",
+            r"\subsection{Current Multi-Family Overlap}",
+        ]
+    )
+    if caa_analysis.multi_family_overlap_names:
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.29\linewidth} >{\raggedright\arraybackslash}p{0.14\linewidth} >{\raggedright\arraybackslash}p{0.17\linewidth} >{\raggedright\arraybackslash}p{0.28\linewidth}}",
+                r"\toprule",
+                r"DNS Name & Zone & Live CA Families & Covering Subject CNs \\",
+                r"\midrule",
+            ]
+        )
+        for name, zone, families, subjects in top_caa_overlap_rows(caa_analysis):
+            lines.append(rf"{latex_escape(name)} & {latex_escape(zone)} & {latex_escape(families)} & {latex_escape(subjects)} \\")
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+    else:
+        lines.append(r"No current multi-family overlap names were found.")
+    lines.append(
+        r"These overlap names are operationally important. They show where the same public DNS name is currently covered by more than one live CA family at once. In this corpus, that behavior clusters tightly in a few service families rather than being spread randomly across the estate."
+    )
+    lines.append(r"\subsection{Current Policy Mismatch}")
+    if caa_analysis.policy_mismatch_names:
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.17\linewidth}}",
+                r"\toprule",
+                r"DNS Name & Zone & Live CA Families & CAA-Allowed Families & CAA Discovery Result \\",
+                r"\midrule",
+            ]
+        )
+        for name, zone, families, allowed, result in top_caa_mismatch_rows(caa_analysis):
+            lines.append(rf"{latex_escape(name)} & {latex_escape(zone)} & {latex_escape(families)} & {latex_escape(allowed)} & {latex_escape(result)} \\")
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+    else:
+        lines.append(r"No current policy-mismatch names were found.")
+    lines.append(
+        r"A current policy mismatch does not automatically prove CA misissuance. CAA only proves what DNS authorizes now. Certificates can remain valid after the DNS-side policy has changed, so the right reading here is current policy lag or migration residue unless the historical issuance-time DNS can also be shown."
+    )
 
     if focus_analysis:
         lines.append(r"\section{Focused Subject-CN Cohort}")
@@ -1864,27 +2227,31 @@ def render_latex(
     lines.append(r"\section{Making The Whole Estate Make Sense}")
     add_summary(
         [
-            "Certificates explain trust, naming, and purpose. DNS explains routing and delivery.",
+            "Certificates, DNS, and CAA explain trust, routing, delivery, and issuance control.",
             "Clean public names usually sit closest to the customer-facing surface.",
-            "Dense SAN sets, numbered families, and multi-zone certificates tend to expose the platform layer beneath the brand layer.",
-            "The overall pattern is more consistent with a federated operating model than with random hostname sprawl.",
+            "Dense SAN sets, numbered families, multi-zone certificates, and narrower CAA policy tend to expose the platform layer beneath the brand layer.",
+            "The overall pattern is more consistent with a federated operating model with uneven governance maturity than with random hostname sprawl.",
         ]
     )
     lines.append(
-        r"The apparent arbitrariness is not best explained as disorder. It is better explained as the visible overlap of multiple valid naming systems created by different functions: brand presentation, service design, operational delivery, and gradual migration."
+        r"The apparent arbitrariness is not best explained as disorder. It is better explained as the visible overlap of multiple valid naming systems created by different functions: brand presentation, service design, operational delivery, issuance control, and gradual migration."
+    )
+    lines.append(
+        r"The new CAA evidence sharpens that point rather than contradicting it. The same families that looked like managed rails from certificate naming and DNS landing often sit under narrower issuance policy as well. The main qualification is that governance is uneven. One configured public zone is policy-layered and governed, while another remains CAA-empty. That is not random chaos, but it is also not uniform control maturity."
     )
 
     lines.append(r"\section{Limits, Confidence, and Noise}")
     add_summary(
         [
-            "High-confidence claims are tied directly to certificate fields, DNS answers, and live trust records.",
+            "High-confidence claims are tied directly to certificate fields, DNS answers, live trust records, and current CAA policy.",
             "Medium-confidence claims are organisational readings drawn from repeated technical patterns.",
             "Lower-confidence claims are exact expansions of abbreviations and exact ownership boundaries inferred from names alone.",
             "A public NXDOMAIN today does not automatically contradict a valid certificate because DNS and certificate lifecycles move on different clocks.",
+            "A current CAA mismatch does not by itself prove historical CA non-compliance, because DNS policy may have changed after issuance.",
         ]
     )
     lines.append(
-        r"A useful way to read the corpus is to separate signal from noise. Repeated naming schemas are signal. Repeated DNS outcomes are signal. Which public CA family keeps issuing a name is signal. Simple \texttt{www} presence or absence is weak evidence either way unless it coincides with stronger differences such as distinct DNS routing, distinct SAN composition, or a distinct certificate renewal history."
+        r"A useful way to read the corpus is to separate signal from noise. Repeated naming schemas are signal. Repeated DNS outcomes are signal. Which public CA family keeps issuing a name is signal. Where CAA is broad, narrow, delegated, or absent is signal. Simple \texttt{www} presence or absence is weak evidence either way unless it coincides with stronger differences such as distinct DNS routing, distinct SAN composition, a distinct certificate renewal history, or a distinct issuance-policy shape."
     )
 
     lines.extend(
@@ -2113,11 +2480,70 @@ def render_latex(
     else:
         lines.append(r"No step weeks met the threshold.")
 
+    lines.extend(
+        [
+            r"\section{CAA Policy Detail}",
+            r"This appendix keeps the issuance-policy evidence inside the monograph. It answers a narrower question than the DNS appendix: not where a name lands, but which public CA families DNS currently authorizes to issue for that name.",
+            r"\subsection{CAA Discovery Paths}",
+            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.54\linewidth}}",
+            r"\toprule",
+            r"CAA Discovery Result & Names & Meaning \\",
+            r"\midrule",
+        ]
+    )
+    for label, count, meaning in caa_source_rows(caa_analysis):
+        lines.append(rf"{latex_escape(label)} & {latex_escape(count)} & {latex_escape(meaning)} \\")
+    lines.extend([r"\bottomrule", r"\end{longtable}"])
+    lines.append(r"\subsection{Policy Regimes By Configured Zone}")
+    for zone in caa_analysis.configured_domains:
+        lines.append(rf"\subsubsection{{{latex_escape(zone)}}}")
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.25\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.53\linewidth}}",
+                r"\toprule",
+                r"Policy Regime & Names & Plain-Language Meaning \\",
+                r"\midrule",
+            ]
+        )
+        for regime, count, meaning in caa_zone_rows[zone]:
+            lines.append(rf"{latex_escape(regime)} & {latex_escape(count)} & {latex_escape(meaning)} \\")
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+    lines.append(r"\subsection{Current Multi-Family Overlap}")
+    if caa_analysis.multi_family_overlap_names:
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.29\linewidth} >{\raggedright\arraybackslash}p{0.14\linewidth} >{\raggedright\arraybackslash}p{0.17\linewidth} >{\raggedright\arraybackslash}p{0.28\linewidth}}",
+                r"\toprule",
+                r"DNS Name & Zone & Live CA Families & Covering Subject CNs \\",
+                r"\midrule",
+            ]
+        )
+        for name, zone, families, subjects in top_caa_overlap_rows(caa_analysis, 40):
+            lines.append(rf"{latex_escape(name)} & {latex_escape(zone)} & {latex_escape(families)} & {latex_escape(subjects)} \\")
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+    else:
+        lines.append(r"No current multi-family overlap names were found.")
+    lines.append(r"\subsection{Current Policy Mismatch}")
+    if caa_analysis.policy_mismatch_names:
+        lines.extend(
+            [
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.17\linewidth}}",
+                r"\toprule",
+                r"DNS Name & Zone & Live CA Families & CAA-Allowed Families & CAA Discovery Result \\",
+                r"\midrule",
+            ]
+        )
+        for name, zone, families, allowed, result in top_caa_mismatch_rows(caa_analysis, 40):
+            lines.append(rf"{latex_escape(name)} & {latex_escape(zone)} & {latex_escape(families)} & {latex_escape(allowed)} & {latex_escape(result)} \\")
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+    else:
+        lines.append(r"No current policy-mismatch names were found.")
+
     if focus_analysis:
         lines.extend(
             [
                 r"\section{Focused Subject-CN Detail}",
-                r"This appendix keeps the complete focused-cohort table inside the monograph, but it now follows the three-bucket taxonomy from Chapter 7. That makes it easier to read the cohort as a set of related naming traditions instead of as one flat mixed list.",
+                r"This appendix keeps the complete focused-cohort table inside the monograph, but it now follows the three-bucket taxonomy from Chapter 8. That makes it easier to read the cohort as a set of related naming traditions instead of as one flat mixed list.",
             ]
         )
         appendix_buckets = [
@@ -2163,6 +2589,12 @@ def main() -> int:
     args = parse_args()
     report = ct_master_report.summarize_for_report(args)
     assessment = ct_lineage_report.build_assessment(build_history_args(args))
+    caa_analysis = ct_caa_analysis.build_analysis(
+        report["hits"],
+        report["domains"],
+        args.caa_cache_dir,
+        args.caa_cache_ttl_seconds,
+    )
     focus_subjects = ct_focus_subjects.load_focus_subjects(args.focus_subjects_file)
     focus_analysis = ct_focus_subjects.build_analysis(
         focus_subjects,
@@ -2172,8 +2604,8 @@ def main() -> int:
         args.dns_cache_ttl_seconds,
     )
     render_appendix_inventory(args, report)
-    render_markdown(args, report, assessment, focus_analysis)
-    render_latex(args, report, assessment, focus_analysis)
+    render_markdown(args, report, assessment, caa_analysis, focus_analysis)
+    render_latex(args, report, assessment, caa_analysis, focus_analysis)
     if not args.skip_pdf:
         ct_scan.compile_latex_to_pdf(args.latex_output, args.pdf_output, args.pdf_engine)
     if not args.quiet:
