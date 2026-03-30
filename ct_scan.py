@@ -678,7 +678,7 @@ def describe_group_basis(group: CertificateGroup) -> str:
         pattern = next(iter(group.numbered_cn_patterns))
         return f"CN pattern with running-number slot: `{pattern}`"
     base = min(canonicalize_subject_cn(value) for value in group.subject_cns)
-    return f"Same endpoint CN family (exact CN, with `www.` folded): `{base}`"
+    return f"Same endpoint CN family (exact CN; `www.` grouped with base name): `{base}`"
 
 
 def primary_issuer_name(hit: CertificateHit) -> str:
@@ -886,7 +886,7 @@ def render_markdown_report(
     lines.append("")
     lines.append("- Chapters are built from Subject CN construction only.")
     lines.append("- If multiple concrete CNs share the same numbered schema, they are grouped together.")
-    lines.append("- Otherwise the chapter is one endpoint family, with `www.` folded into the same base endpoint.")
+    lines.append("- Otherwise the chapter is one endpoint family; `www.` is grouped with the base name as a low-signal convenience.")
     lines.append("- SAN entries are shown only inside each Subject CN subsection.")
     lines.append("- All certificates shown here are verified leaf certificates.")
     lines.append("")

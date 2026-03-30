@@ -232,7 +232,7 @@ def example_pattern_label(title: str) -> str:
     return {
         "Shared operational rail": "Numbered fleet or operational-rail naming",
         "Environment matrix certificate": "Environment-matrix and lifecycle naming",
-        "Clean public front door": "Public brand-entry naming",
+        "Brand-platform splice": "Cross-brand namespace and migration-residue naming",
         "Cross-zone bridge": "Cross-zone bridge or shared-service naming",
     }.get(title, "Naming pattern")
 
@@ -617,9 +617,9 @@ def render_markdown(
     lines.extend(
         [
             f"- Numbered CN families: {len(report['numbered_groups'])}.",
-            f"- Clean base-name plus `www` pairings: {report['public_www_pair_count']}.",
             f"- Multi-zone SAN sets: {report['multi_zone_hit_count']}.",
             f"- Frequent naming tokens: {', '.join(f'{token} ({count})' for token, count in report['top_env_tokens'][:8])}.",
+            "- The strongest naming signals come from numbered rails, environment markers, cross-brand labels, and cross-zone SAN composition. `www` is weak evidence either way.",
         ]
     )
     lines.append("")
@@ -631,7 +631,7 @@ def render_markdown(
         [
             "- In most of these names, the left-most label tells you the endpoint role, node slot, or environment slice, while the zone on the right tells you which public namespace the service is answering under.",
             "- Standard delivery shorthand appears throughout the corpus: `dev`, `qa`, `uat`, `sit`, `stg`, `preprod`, and `prod` are ordinary environment markers rather than mysterious product names.",
-            "- `www` usually means a public web presentation rule, not a platform rail.",
+            "- `www` is a weak signal both when present and when absent. Its presence often reflects compatibility, redirect history, or old web conventions; its absence does not imply any deeper architectural distinction.",
             "- In this corpus, `nwg` reads as NatWest Group shorthand. Names like `rbs`, `natwest`, `ulsterbank`, `lombard`, `natwestpayments`, `coutts`, and `nwgwealth` are best read as parallel business or service namespaces within a wider shared estate, not as random unrelated domains.",
             "- Some short forms remain inferential rather than provable. For example, `nft` clearly behaves like a non-production stage label, but Certificate Transparency alone cannot prove the local expansion used inside the company.",
         ]
@@ -652,7 +652,7 @@ def render_markdown(
         lines.append("")
     lines.append("### Why These Four Examples")
     lines.append("")
-    lines.append("Taken together, these four examples explain most of the naming behaviour in the corpus. The first shows platform fleet naming, the second shows environment-and-release naming, the third shows customer-facing brand presentation, and the fourth shows shared-service or migration bridging across several business namespaces.")
+    lines.append("Taken together, these four examples explain most of the naming behaviour in the corpus. The first shows platform fleet naming, the second shows environment-and-release naming, the third shows cross-brand namespace splicing and migration residue, and the fourth shows shared-service bridging across several business namespaces.")
     lines.append("")
     lines.append("## Chapter 6: DNS Delivery Architecture")
     lines.append("")
@@ -729,7 +729,7 @@ def render_markdown(
         ]
     )
     lines.append("")
-    lines.append("A useful way to read the corpus is to separate signal from noise. Repeated naming schemas are signal. Repeated DNS landing stacks are signal. Public trust lineage is signal. A one-off unusual label is usually noise unless it recurs across several certificates or lands on a distinctive platform.")
+    lines.append("A useful way to read the corpus is to separate signal from noise. Repeated naming schemas are signal. Repeated DNS landing patterns are signal. Public trust lineage is signal. Simple `www` presence or absence is weak evidence either way unless it coincides with stronger differences such as distinct DNS routing, distinct SAN composition, or a distinct certificate lineage.")
     lines.append("")
     lines.append("## Appendix A: Full Family Catalogue")
     lines.append("")
@@ -1319,9 +1319,9 @@ def render_latex(
     add_summary(
         [
             f"Numbered CN families: {len(report['numbered_groups'])}.",
-            f"Clean base-name plus www pairings: {report['public_www_pair_count']}.",
             f"Multi-zone SAN sets: {report['multi_zone_hit_count']}.",
             f"Frequent naming tokens are {', '.join(f'{token} ({count})' for token, count in report['top_env_tokens'][:8])}.",
+            "The strongest naming signals come from numbered rails, environment markers, cross-brand labels, and cross-zone SAN composition. www is weak evidence either way.",
         ]
     )
     lines.append(
@@ -1333,7 +1333,7 @@ def render_latex(
             r"\begin{itemize}[leftmargin=1.4em]",
             r"\item In most of these names, the left-most label tells you the endpoint role, node slot, or environment slice, while the zone on the right tells you which public namespace the service is answering under.",
             r"\item Standard delivery shorthand appears throughout the corpus: \texttt{dev}, \texttt{qa}, \texttt{uat}, \texttt{sit}, \texttt{stg}, \texttt{preprod}, and \texttt{prod} are ordinary environment markers rather than mysterious product names.",
-            r"\item \texttt{www} usually means a public web presentation rule, not a platform rail.",
+            r"\item \texttt{www} is a weak signal both when present and when absent. Its presence often reflects compatibility, redirect history, or old web conventions; its absence does not imply any deeper architectural distinction.",
             r"\item In this corpus, \texttt{nwg} reads as NatWest Group shorthand. Names like \texttt{rbs}, \texttt{natwest}, \texttt{ulsterbank}, \texttt{lombard}, \texttt{natwestpayments}, \texttt{coutts}, and \texttt{nwgwealth} are best read as parallel business or service namespaces within a wider shared estate, not as random unrelated domains.",
             r"\item Some short forms remain inferential rather than provable. For example, \texttt{nft} clearly behaves like a non-production stage label, but Certificate Transparency alone cannot prove the local expansion used inside the company.",
             r"\end{itemize}",
@@ -1356,7 +1356,7 @@ def render_latex(
     lines.extend(
         [
             r"\subsection{Why These Four Examples}",
-            r"Taken together, these four examples explain most of the naming behaviour in the corpus. The first shows platform fleet naming, the second shows environment-and-release naming, the third shows customer-facing brand presentation, and the fourth shows shared-service or migration bridging across several business namespaces.",
+            r"Taken together, these four examples explain most of the naming behaviour in the corpus. The first shows platform fleet naming, the second shows environment-and-release naming, the third shows cross-brand namespace splicing and migration residue, and the fourth shows shared-service bridging across several business namespaces.",
         ]
     )
 
@@ -1438,6 +1438,9 @@ def render_latex(
             "Lower-confidence claims are exact expansions of abbreviations and exact ownership boundaries inferred from names alone.",
             "A public NXDOMAIN today does not automatically contradict a valid certificate because DNS and certificate lifecycles move on different clocks.",
         ]
+    )
+    lines.append(
+        r"A useful way to read the corpus is to separate signal from noise. Repeated naming schemas are signal. Repeated DNS landing patterns are signal. Public trust lineage is signal. Simple \texttt{www} presence or absence is weak evidence either way unless it coincides with stronger differences such as distinct DNS routing, distinct SAN composition, or a distinct certificate lineage."
     )
 
     lines.extend(

@@ -160,6 +160,11 @@ def dns_zone_count(hit: ct_scan.CertificateHit) -> int:
     return len(zones)
 
 
+def zone_root_label(name: str) -> str:
+    zone = ct_scan.san_tail_split(name)[1]
+    return zone.split(".")[0].lower()
+
+
 def group_member_hits(groups: list[ct_scan.CertificateGroup], hits: list[ct_scan.CertificateHit]) -> dict[str, list[ct_scan.CertificateHit]]:
     mapping: dict[str, list[ct_scan.CertificateHit]] = {}
     for group in groups:
@@ -266,18 +271,54 @@ def pick_examples(
             )
         )
 
-    www_hits = [hit for hit in hits if is_www_pair(hit)]
-    if www_hits:
-        hit = min(www_hits, key=lambda item: (item.subject_cn.count("."), item.subject_cn))
+    zone_tokens = sorted(
+        {
+            zone_root_label(hit.subject_cn)
+            for hit in hits
+            if "." in hit.subject_cn
+        }
+        | {
+            zone_root_label(entry[4:])
+            for hit in hits
+            for entry in hit.san_entries
+            if entry.startswith("DNS:")
+        }
+    )
+    splice_hits = []
+    for hit in hits:
+        if "." not in hit.subject_cn:
+            continue
+        leading_label = hit.subject_cn.split(".")[0].lower()
+        public_zone = ct_scan.san_tail_split(hit.subject_cn)[1]
+        public_zone_root = public_zone.split(".")[0].lower()
+        foreign_tokens = [token for token in zone_tokens if token != public_zone_root and token in leading_label]
+        if foreign_tokens:
+            splice_hits.append((hit, public_zone, foreign_tokens))
+    if splice_hits:
+        hit, public_zone, foreign_tokens = max(
+            splice_hits,
+            key=lambda item: (dns_zone_count(item[0]), len(item[0].san_entries), item[0].subject_cn),
+        )
+        middle_segment = hit.subject_cn.split(".")[1] if hit.subject_cn.count(".") >= 2 else ""
+        related = sorted(
+            {
+                other.subject_cn
+                for other in hits
+                if middle_segment and f".{middle_segment}." in other.subject_cn
+                and other.subject_cn != hit.subject_cn
+                and ct_scan.san_tail_split(other.subject_cn)[1] == public_zone
+            }
+        )
         examples.append(
             ExampleBlock(
-                title="Clean public front door",
+                title="Brand-platform splice",
                 subject_cn=hit.subject_cn,
-                why_it_matters="A two-name SAN pairing of the apex hostname with its www form is usually a deliberate customer-facing presentation rule rather than an internal platform rail.",
+                why_it_matters="When the left side of a hostname carries one business or platform label but the public zone belongs to another brand, that usually exposes migration residue or a shared platform being presented through a different public namespace.",
                 evidence=[
-                    f"SAN entries: {', '.join(entry[4:] for entry in hit.san_entries if entry.startswith('DNS:'))}.",
-                    f"Issuer: {sorted(hit.issuer_names)[0]}.",
-                    f"Revocation status: {hit.revocation_status}.",
+                    f"Subject CN mixes leading-label namespace tokens {', '.join(foreign_tokens[:3])} with the public zone {public_zone}: {hit.subject_cn}.",
+                    f"Distinct DNS zones in SAN set: {dns_zone_count(hit)}.",
+                    f"Representative sibling names in the same middle namespace: {', '.join(related[:5]) or 'none'}.",
+                    f"SAN entries: {len(hit.san_entries)}.",
                 ],
             )
         )
