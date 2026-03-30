@@ -83,6 +83,8 @@ class FocusSubjectDetail:
     subject_cn: str
     analyst_note: str
     analyst_theme: str
+    taxonomy_bucket: str
+    taxonomy_reason: str
     observed_role: str
     basket_status: str
     current_direct_certificates: int
@@ -96,6 +98,7 @@ class FocusSubjectDetail:
     current_issuer_families: str
     historical_issuer_families: str
     current_san_size_span: str
+    historical_san_size_span: str
     max_direct_to_carrier_overlap_days: int
     carrier_subjects: str
     current_red_flags: str
@@ -135,6 +138,7 @@ class FocusCohortAnalysis:
     focus_current_red_flag_subjects: int
     focus_past_red_flag_subjects: int
     focus_any_red_flag_subjects: int
+    bucket_counts: Counter[str]
     notables: list[FocusSubjectDetail]
     transition_rows: list[FocusSubjectDetail]
 
@@ -219,6 +223,15 @@ def san_size_span(current_hits: list[ct_scan.CertificateHit]) -> str:
     return ", ".join(str(value) for value in sizes[:4]) + ("" if len(sizes) <= 4 else f", ... (+{len(sizes) - 4} more)")
 
 
+def historical_san_size_span(certificates: list[ct_lineage_report.HistoricalCertificate]) -> str:
+    sizes = sorted({len(certificate.san_entries) for certificate in certificates})
+    if not sizes:
+        return "-"
+    if len(sizes) == 1:
+        return str(sizes[0])
+    return ", ".join(str(value) for value in sizes[:4]) + ("" if len(sizes) <= 4 else f", ... (+{len(sizes) - 4} more)")
+
+
 def summarize_names(values: set[str], limit: int = 4) -> str:
     if not values:
         return "-"
@@ -226,6 +239,45 @@ def summarize_names(values: set[str], limit: int = 4) -> str:
     if len(ordered) <= limit:
         return ", ".join(ordered)
     return ", ".join(ordered[:limit]) + f", ... (+{len(ordered) - limit} more)"
+
+
+def zone_count_from_sans(san_entries: list[str]) -> int:
+    return len(
+        {
+            ct_scan.san_tail_split(entry[4:])[1]
+            for entry in san_entries
+            if entry.startswith("DNS:")
+        }
+    )
+
+
+def max_san_count_current(hits: list[ct_scan.CertificateHit]) -> int:
+    return max((len(hit.san_entries) for hit in hits), default=0)
+
+
+def max_san_count_historical(certificates: list[ct_lineage_report.HistoricalCertificate]) -> int:
+    return max((len(certificate.san_entries) for certificate in certificates), default=0)
+
+
+def max_zone_count_current(hits: list[ct_scan.CertificateHit]) -> int:
+    return max((zone_count_from_sans(hit.san_entries) for hit in hits), default=0)
+
+
+def bucket_sort_key(value: str) -> tuple[int, str]:
+    order = {
+        "direct_front_door": 0,
+        "platform_matrix_anchor": 1,
+        "ambiguous_legacy": 2,
+    }
+    return (order.get(value, 99), value)
+
+
+def taxonomy_bucket_label(bucket: str) -> str:
+    return {
+        "direct_front_door": "Front-door direct name",
+        "platform_matrix_anchor": "Platform-anchor matrix name",
+        "ambiguous_legacy": "Ambiguous or legacy residue",
+    }.get(bucket, bucket)
 
 
 def analyst_theme(subject: FocusSubject) -> str:
@@ -242,6 +294,70 @@ def analyst_theme(subject: FocusSubject) -> str:
     if re.fullmatch(r"\d+", left_label) or re.fullmatch(r"[a-z]{2,6}\d{1,4}", left_label):
         return "opaque or legacy label"
     return "human-named branded or service endpoint"
+
+
+def classify_taxonomy_bucket(
+    subject: FocusSubject,
+    current_hits: list[ct_scan.CertificateHit],
+    historical_hits: list[ct_lineage_report.HistoricalCertificate],
+    current_carriers: list[ct_scan.CertificateHit],
+    historical_carriers: list[ct_lineage_report.HistoricalCertificate],
+) -> tuple[str, str]:
+    tokens = set(re.findall(r"[a-z0-9]+", f"{subject.subject_cn} {subject.analyst_note}".lower()))
+    left_label = subject.subject_cn.split(".")[0].lower()
+    opaque_label = bool(
+        re.fullmatch(r"\d+", left_label)
+        or re.fullmatch(r"[a-z]{1,4}\d{1,4}", left_label)
+    )
+    current_direct_exists = bool(current_hits)
+    historical_direct_exists = bool(historical_hits)
+    max_current_sans = max_san_count_current(current_hits)
+    max_historical_sans = max_san_count_historical(historical_hits)
+    max_any_sans = max(max_current_sans, max_historical_sans)
+    max_current_zones = max_zone_count_current(current_hits)
+    carrier_only_today = not current_direct_exists and bool(current_carriers)
+    carrier_only_history = (not current_direct_exists and not historical_direct_exists and bool(historical_carriers))
+    environment_signal = bool(ENVIRONMENT_HINTS & tokens)
+
+    if max_any_sans >= 20:
+        return (
+            "platform_matrix_anchor",
+            "Large SAN matrix coverage indicates an umbrella certificate for a managed platform slice rather than one standalone public front door.",
+        )
+    if carrier_only_today or carrier_only_history:
+        return (
+            "ambiguous_legacy",
+            "This name now appears mainly as a carried SAN passenger or as historical residue, so it no longer behaves like a stable standalone certificate front.",
+        )
+    if current_direct_exists and max_any_sans <= 4 and max_current_zones <= 1 and not opaque_label and not environment_signal:
+        return (
+            "direct_front_door",
+            "Small direct certificates, single-zone scope, and a human-readable service label fit the pattern of a branded or service-facing public entry point.",
+        )
+    if historical_direct_exists and not current_direct_exists and max_any_sans <= 4 and not opaque_label:
+        return (
+            "ambiguous_legacy",
+            "The historical certificates look like a simple direct front, but there is no current direct certificate anymore, which makes this mostly migration residue rather than a live front-door pattern.",
+        )
+    if max_any_sans <= 4 and opaque_label:
+        return (
+            "ambiguous_legacy",
+            "The direct certificate shape is small and simple, but the left-most label is too opaque to treat as a clear branded or service-front naming pattern.",
+        )
+    if environment_signal and max_any_sans <= 19:
+        return (
+            "ambiguous_legacy",
+            "Environment-style wording is present, but the SAN coverage is not broad enough to prove a full platform-matrix certificate role.",
+        )
+    if max_any_sans > 4:
+        return (
+            "ambiguous_legacy",
+            "Direct issuance exists, but the SAN set is broader or more variable than a simple one-service front, which leaves the role mixed.",
+        )
+    return (
+        "ambiguous_legacy",
+        "The evidence is mixed or too thin to place this name cleanly in one of the stronger bucket patterns.",
+    )
 
 
 def observed_role(
@@ -364,10 +480,19 @@ def build_analysis(
                         carrier_certificate.effective_not_after,
                     ),
                 )
+        taxonomy_bucket, taxonomy_reason = classify_taxonomy_bucket(
+            subject,
+            current_direct,
+            historical_direct,
+            current_carriers,
+            historical_carriers,
+        )
         detail = FocusSubjectDetail(
             subject_cn=subject.subject_cn,
             analyst_note=subject.analyst_note or "-",
             analyst_theme=analyst_theme(subject),
+            taxonomy_bucket=taxonomy_bucket,
+            taxonomy_reason=taxonomy_reason,
             observed_role=observed_role(subject, current_direct, current_carriers, historical_carriers, observation),
             basket_status=basket_status(current_direct, current_carriers, historical_direct, historical_carriers),
             current_direct_certificates=len(current_direct),
@@ -387,6 +512,7 @@ def build_analysis(
                 for name, count in historical_issuer_families.most_common()
             ) or "-",
             current_san_size_span=san_size_span(current_direct),
+            historical_san_size_span=historical_san_size_span(historical_direct),
             max_direct_to_carrier_overlap_days=max_overlap,
             carrier_subjects=summarize_names({hit.subject_cn for hit in current_carriers} | {certificate.subject_cn for certificate in historical_carriers}),
             current_red_flags=red_flag_text(current_red_flag_lookup, subject.subject_cn),
@@ -426,6 +552,7 @@ def build_analysis(
     notables = sorted(
         detail_rows,
         key=lambda item: (
+            bucket_sort_key(item.taxonomy_bucket),
             -(
                 (item.current_revoked_certificates > 0)
                 + (item.current_non_focus_san_carriers > 0)
@@ -440,7 +567,7 @@ def build_analysis(
 
     return FocusCohortAnalysis(
         focus_subjects=subjects,
-        details=sorted(detail_rows, key=lambda item: item.subject_cn.casefold()),
+        details=sorted(detail_rows, key=lambda item: (bucket_sort_key(item.taxonomy_bucket), item.subject_cn.casefold())),
         provided_subjects_count=len(subjects),
         historically_seen_subjects_count=sum(
             1
@@ -492,6 +619,7 @@ def build_analysis(
             for subject in subjects
             if subject.subject_cn in current_red_flag_subjects or subject.subject_cn in past_red_flag_subjects
         ),
+        bucket_counts=Counter(item.taxonomy_bucket for item in detail_rows),
         notables=notables,
         transition_rows=sorted(
             transition_rows,
