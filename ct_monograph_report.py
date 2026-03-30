@@ -1024,7 +1024,7 @@ def render_markdown(
     lines.append("")
     lines.append("The glossary terms above are the building blocks used in the DNS-outcome table. This is also why the management summary mentions Adobe Campaign, CloudFront, Apigee, and Pega at all: not because brand names are the point, but because those names reveal what kind of public delivery role a hostname is landing on. CloudFront suggests a distribution edge, Apigee suggests managed API exposure, Adobe Campaign suggests a marketing or communications front, and a load balancer suggests traffic distribution to backend services.")
     lines.append("")
-    lines.append("The next chapter keeps the same names in view but asks a different question: not where the names land, but which public CA families DNS currently authorizes to issue for them.")
+    lines.append("The next chapter stays with the same names but moves from delivery to control. This chapter asked where public traffic lands. The next one asks which public CA families DNS currently authorizes to issue for those same names.")
     lines.append("")
     lines.append("## Chapter 7: DNS Issuance Policy Control (CAA)")
     lines.append("")
@@ -1050,15 +1050,30 @@ def render_markdown(
     lines.append("")
     lines.append("CAA is the DNS control layer for public certificate issuance. It does not validate a certificate after issuance; instead, it tells a public CA which CA families are authorized to issue for a DNS name if any restriction is published at all. If no CAA is published, WebPKI issuance is unrestricted from the DNS-policy point of view.")
     lines.append("")
-    lines.append("This chapter adds the missing control dimension to the earlier chapters. The certificate chapter showed who actually issued. The DNS chapter showed where the names land. The CAA chapter shows which issuers are supposed to be allowed by DNS policy.")
+    lines.append("This chapter is the control-plane counterpart to the certificate and DNS chapters. The certificate chapter showed who actually issued. The DNS chapter showed where the names land. The CAA chapter shows which issuers the DNS owner currently allows for those same names.")
+    lines.append("")
+    lines.append("That distinction matters because hosting and issuance are different decisions. A name can land on AWS and still use a Sectigo-family certificate if DNS policy allows it. A name can also resolve through a vendor platform while still inheriting a first-party corporate CAA policy. The point of this chapter is to show where those decisions line up and where they do not.")
     lines.append("")
     lines.append("CAA is checked per DNS name requested in the certificate, not per Subject DN and not per organisational story. A Subject CN can therefore shift between different Subject DN values without creating a CAA clash, because CAA ignores organisation fields and looks only at the DNS names being certified.")
+    lines.append("")
+    lines.append("### Why CAA Matters In This Estate")
+    lines.append("")
+    lines.extend(
+        [
+            "- If a name has no CAA, DNS is not constraining which public CA family may issue for it.",
+            "- If a name inherits a broad corporate policy, that usually means the organisation has left normal brand-facing names under a common default.",
+            "- If a name falls under a narrower subtree or alias-derived policy, that is evidence of more deliberate platform or vendor-specific issuance control.",
+            "- If a live certificate family sits outside today's CAA policy, or if the same DNS name is live under two CA families at once, that usually points to migration lag, overlapping rollout, or policy that moved faster than certificate cleanup.",
+        ]
+    )
     lines.append("")
     lines.append("### How To Read The CAA Results")
     lines.append("")
     lines.extend(md_table(["CAA Discovery Result", "Names", "Meaning"], caa_source_rows(caa_analysis)))
     lines.append("")
     lines.append("The key distinction is between ordinary parent inheritance and alias-target-derived policy. Parent inheritance means the leaf name simply relies on a policy published higher in its own DNS tree. Alias-target-derived policy means the effective CAA surfaced through an alias response. In this corpus, that often marks a managed rail or specialist external platform rather than a plain brand-front hostname.")
+    lines.append("")
+    lines.append("In practical terms, most names in this corpus fall into three shapes: inherited corporate policy, alias-driven managed-platform policy, or no CAA at all. That three-way split is more important than the mechanics themselves, because it shows where issuance control is broad, where it is deliberately narrow, and where it is absent.")
     lines.append("")
     lines.append("### Policy Regimes By Configured Zone")
     lines.append("")
@@ -1070,14 +1085,28 @@ def render_markdown(
     if secondary_zone:
         lines.append(f"The contrast between `{primary_zone}` and `{secondary_zone}` is one of the strongest PKI-governance findings in the corpus. `{primary_zone}` is policy-layered and governed, while `{secondary_zone}` is currently CAA-empty in the scanned name set. That does not make `{secondary_zone}` invalid, but it does mean DNS is not constraining public CA choice there.")
         lines.append("")
-    lines.append("### What The CAA Layer Does To The Earlier Thesis")
+        lines.append(f"That asymmetry matters more than any one record. `{primary_zone}` looks like a namespace where DNS is being used as an issuance-governance tool. `{secondary_zone}` looks like a namespace where issuance choice is still being handled outside DNS policy, or not being constrained at all.")
+        lines.append("")
+    lines.append("### How CAA Changes The Reading Of The Estate")
     lines.append("")
     lines.extend(
         [
             "- The CAA layer strengthens the earlier certificate-and-DNS thesis rather than overturning it. The same service families that already looked like shared managed rails from naming and DNS often sit under narrower issuance policy as well.",
             f"- In `{primary_zone}`, the current CAA friction is concentrated rather than diffuse: {caa_concentration_text(caa_analysis, primary_zone)}.",
             "- Broad corporate default policy remains visible on many ordinary brand-facing names. That supports the earlier reading that not every public hostname was moved onto one tightly managed delivery rail.",
+            "- Narrower or alias-driven CAA policy appears where the DNS evidence already suggested a managed platform, campaign rail, or vendor-mediated service surface.",
             "- Vendor-style exceptions still exist. Where a name resolves through a specialist external platform and the allowed CA set widens or changes shape, the policy layer supports the earlier vendor-delegation reading rather than contradicting it.",
+            "- The chapter therefore adds a governance gradient to the earlier thesis: some parts of the estate are tightly steered, some inherit a broad default, and some are still policy-empty.",
+        ]
+    )
+    lines.append("")
+    lines.append("### Why The Next Two Tables Matter")
+    lines.append("")
+    lines.extend(
+        [
+            "- The overlap table shows where an old and a new issuance regime are both still live on the same DNS name.",
+            "- The mismatch table shows where today's DNS policy has already moved, but one or more live certificates still reflect the older state.",
+            "- Read them together, not separately. Together they show whether the estate looks diffusely messy or whether the untidy parts cluster in a small transition zone.",
         ]
     )
     lines.append("")
@@ -1098,6 +1127,8 @@ def render_markdown(
         lines.append("No current policy-mismatch names were found.")
     lines.append("")
     lines.append("A current policy mismatch does not automatically prove CA misissuance. CAA only proves what DNS authorizes now. Certificates can remain valid after the DNS-side policy has changed, so the right reading here is current policy lag or migration residue unless the historical issuance-time DNS can also be shown.")
+    lines.append("")
+    lines.append("Taken together, the overlap and mismatch tables support a migration reading more than a disorder reading. If the estate were simply chaotic, the live friction would be spread widely across unrelated names. Instead, it clusters in a small number of service families that were already prominent in the certificate and DNS chapters.")
     lines.append("")
     if focus_analysis:
         lines.append("## Chapter 8: Focused Subject-CN Cohort")
@@ -1179,13 +1210,18 @@ def render_markdown(
     lines.extend(
         [
             "- The certificate, DNS, and CAA layers are not three separate stories. They are three views of the same operating estate.",
-            "- Clean public brand names usually sit closest to the customer surface.",
-            "- Dense SAN sets, numbered families, multi-zone certificates, and narrower CAA policy usually expose the underlying shared service rails and platform layer.",
+            "- Naming shows role and organisational memory; DNS shows where traffic lands; CAA shows how tightly issuance is governed.",
+            "- Clean public brand names usually sit closest to the customer surface, while dense SAN sets, numbered families, multi-zone certificates, and narrower CAA policy usually expose the shared platform layer beneath them.",
+            "- When the layers disagree, the disagreement usually signals migration or uneven governance maturity rather than a flat contradiction.",
             "- The overall shape is more consistent with a federated operating model with uneven governance maturity than with random hostname sprawl.",
         ]
     )
     lines.append("")
     lines.append("The common ground is operational reality. A branded proposition wants recognisable names. A service team wants a stable endpoint namespace. A platform team wants shared rails and repeatable delivery machinery. A hosting team wants routable front doors that can land on cloud distribution, gateways, or workflow platforms. A security or PKI function wants some names tightly governed and other names left broad or delegated. Certificates, DNS, and CAA tell the same estate story from different angles.")
+    lines.append("")
+    lines.append("A useful way to combine the layers is to ask four questions in order. First, what does the name itself look like: a direct front door, a numbered rail, an environment slice, or a bridge across business zones? Second, how broad is the SAN set: is this one visible service or a bundled platform certificate? Third, where does public DNS actually land the name: direct host, CDN edge, API gateway, campaign rail, or specialist platform? Fourth, does DNS issuance policy stay broad, narrow sharply, or disappear entirely?")
+    lines.append("")
+    lines.append("When those answers align, the reading becomes strong. A small-SAN branded name with ordinary inherited policy reads like a direct public front. A dense multi-zone certificate with numbered families, managed DNS landing, and narrower CAA reads like a shared operational rail. A name that lands on AWS but still uses a Sectigo-family certificate shows that hosting choice and CA choice are separate decisions. A name with current overlap and current policy mismatch shows a transition area where the newer issuance model is already in place but the older certificate state has not fully disappeared.")
     lines.append("")
     lines.append("This is why the estate can look both tidy and messy at once. It is tidy within each layer, but messy across layers because the layers are solving different problems. The new CAA evidence sharpens that point rather than contradicting it: the managed rail families are not only named and hosted differently, they are often policy-controlled differently as well. The biggest qualification is that governance is uneven. The primary configured zone shows layered issuance control, while another configured zone remains CAA-empty. That is not random chaos, but it is also not uniform control maturity.")
     lines.append("")
@@ -2011,7 +2047,7 @@ def render_latex(
         r"The glossary terms above are the building blocks used in the DNS-outcome table. This is also why the management summary mentions Adobe Campaign, CloudFront, Apigee, and Pega at all: not because brand names are the point, but because those names reveal what kind of public delivery role a hostname is landing on. CloudFront suggests a distribution edge, Apigee suggests managed API exposure, Adobe Campaign suggests a marketing or communications front, and a load balancer suggests traffic distribution to backend services."
     )
     lines.append(
-        r"The next chapter keeps the same names in view but asks a different question: not where the names land, but which public CA families DNS currently authorizes to issue for them."
+        r"The next chapter stays with the same names but moves from delivery to control. This chapter asked where public traffic lands. The next one asks which public CA families DNS currently authorizes to issue for those same names."
     )
 
     lines.append(r"\section{DNS Issuance Policy Control (CAA)}")
@@ -2038,10 +2074,24 @@ def render_latex(
         r"CAA is the DNS control layer for public certificate issuance. It does not validate a certificate after issuance; instead, it tells a public CA which CA families are authorized to issue for a DNS name if any restriction is published at all. If no CAA is published, WebPKI issuance is unrestricted from the DNS-policy point of view."
     )
     lines.append(
-        r"This chapter adds the missing control dimension to the earlier chapters. The certificate chapter showed who actually issued. The DNS chapter showed where the names land. The CAA chapter shows which issuers are supposed to be allowed by DNS policy."
+        r"This chapter is the control-plane counterpart to the certificate and DNS chapters. The certificate chapter showed who actually issued. The DNS chapter showed where the names land. The CAA chapter shows which issuers the DNS owner currently allows for those same names."
+    )
+    lines.append(
+        r"That distinction matters because hosting and issuance are different decisions. A name can land on AWS and still use a Sectigo-family certificate if DNS policy allows it. A name can also resolve through a vendor platform while still inheriting a first-party corporate CAA policy. The point of this chapter is to show where those decisions line up and where they do not."
     )
     lines.append(
         r"CAA is checked per DNS name requested in the certificate, not per Subject DN and not per organisational story. A Subject CN can therefore shift between different Subject DN values without creating a CAA clash, because CAA ignores organisation fields and looks only at the DNS names being certified."
+    )
+    lines.extend(
+        [
+            r"\subsection{Why CAA Matters In This Estate}",
+            r"\begin{itemize}[leftmargin=1.4em]",
+            r"\item If a name has no CAA, DNS is not constraining which public CA family may issue for it.",
+            r"\item If a name inherits a broad corporate policy, that usually means the organisation has left normal brand-facing names under a common default.",
+            r"\item If a name falls under a narrower subtree or alias-derived policy, that is evidence of more deliberate platform or vendor-specific issuance control.",
+            r"\item If a live certificate family sits outside today's CAA policy, or if the same DNS name is live under two CA families at once, that usually points to migration lag, overlapping rollout, or policy that moved faster than certificate cleanup.",
+            r"\end{itemize}",
+        ]
     )
     lines.extend(
         [
@@ -2057,6 +2107,9 @@ def render_latex(
     lines.extend([r"\bottomrule", r"\end{longtable}"])
     lines.append(
         r"The key distinction is between ordinary parent inheritance and alias-target-derived policy. Parent inheritance means the leaf name simply relies on a policy published higher in its own DNS tree. Alias-target-derived policy means the effective CAA surfaced through an alias response. In this corpus, that often marks a managed rail or specialist external platform rather than a plain brand-front hostname."
+    )
+    lines.append(
+        r"In practical terms, most names in this corpus fall into three shapes: inherited corporate policy, alias-driven managed-platform policy, or no CAA at all. That three-way split is more important than the mechanics themselves, because it shows where issuance control is broad, where it is deliberately narrow, and where it is absent."
     )
     lines.append(r"\subsection{Policy Regimes By Configured Zone}")
     for zone in caa_analysis.configured_domains:
@@ -2076,13 +2129,24 @@ def render_latex(
         lines.append(
             rf"The contrast between \texttt{{{latex_escape(primary_zone)}}} and \texttt{{{latex_escape(secondary_zone)}}} is one of the strongest PKI-governance findings in the corpus. \texttt{{{latex_escape(primary_zone)}}} is policy-layered and governed, while \texttt{{{latex_escape(secondary_zone)}}} is currently CAA-empty in the scanned name set. That does not make \texttt{{{latex_escape(secondary_zone)}}} invalid, but it does mean DNS is not constraining public CA choice there."
         )
+        lines.append(
+            rf"That asymmetry matters more than any one record. \texttt{{{latex_escape(primary_zone)}}} looks like a namespace where DNS is being used as an issuance-governance tool. \texttt{{{latex_escape(secondary_zone)}}} looks like a namespace where issuance choice is still being handled outside DNS policy, or not being constrained at all."
+        )
     lines.extend(
         [
-            r"\subsection{What The CAA Layer Does To The Earlier Thesis}",
+            r"\subsection{How CAA Changes The Reading Of The Estate}",
             r"The CAA layer strengthens the earlier certificate-and-DNS thesis rather than overturning it. The same service families that already looked like shared managed rails from naming and DNS often sit under narrower issuance policy as well.",
             rf"In \texttt{{{latex_escape(primary_zone)}}}, the current CAA friction is concentrated rather than diffuse: {latex_escape(caa_concentration_text(caa_analysis, primary_zone))}.",
             r"Broad corporate default policy remains visible on many ordinary brand-facing names. That supports the earlier reading that not every public hostname was moved onto one tightly managed delivery rail.",
+            r"Narrower or alias-driven CAA policy appears where the DNS evidence already suggested a managed platform, campaign rail, or vendor-mediated service surface.",
             r"Vendor-style exceptions still exist. Where a name resolves through a specialist external platform and the allowed CA set widens or changes shape, the policy layer supports the earlier vendor-delegation reading rather than contradicting it.",
+            r"The chapter therefore adds a governance gradient to the earlier thesis: some parts of the estate are tightly steered, some inherit a broad default, and some are still policy-empty.",
+            r"\subsection{Why The Next Two Tables Matter}",
+            r"\begin{itemize}[leftmargin=1.4em]",
+            r"\item The overlap table shows where an old and a new issuance regime are both still live on the same DNS name.",
+            r"\item The mismatch table shows where today's DNS policy has already moved, but one or more live certificates still reflect the older state.",
+            r"\item Read them together, not separately. Together they show whether the estate looks diffusely messy or whether the untidy parts cluster in a small transition zone.",
+            r"\end{itemize}",
             r"\subsection{Current Multi-Family Overlap}",
         ]
     )
@@ -2120,6 +2184,9 @@ def render_latex(
         lines.append(r"No current policy-mismatch names were found.")
     lines.append(
         r"A current policy mismatch does not automatically prove CA misissuance. CAA only proves what DNS authorizes now. Certificates can remain valid after the DNS-side policy has changed, so the right reading here is current policy lag or migration residue unless the historical issuance-time DNS can also be shown."
+    )
+    lines.append(
+        r"Taken together, the overlap and mismatch tables support a migration reading more than a disorder reading. If the estate were simply chaotic, the live friction would be spread widely across unrelated names. Instead, it clusters in a small number of service families that were already prominent in the certificate and DNS chapters."
     )
 
     if focus_analysis:
@@ -2227,17 +2294,24 @@ def render_latex(
     lines.append(r"\section{Making The Whole Estate Make Sense}")
     add_summary(
         [
-            "Certificates, DNS, and CAA explain trust, routing, delivery, and issuance control.",
-            "Clean public names usually sit closest to the customer-facing surface.",
-            "Dense SAN sets, numbered families, multi-zone certificates, and narrower CAA policy tend to expose the platform layer beneath the brand layer.",
+            "The certificate, DNS, and CAA layers are not three separate stories. They are three views of the same operating estate.",
+            "Naming shows role and organisational memory; DNS shows where traffic lands; CAA shows how tightly issuance is governed.",
+            "Clean public brand names usually sit closest to the customer surface, while dense SAN sets, numbered families, multi-zone certificates, and narrower CAA policy usually expose the shared platform layer beneath them.",
+            "When the layers disagree, the disagreement usually signals migration or uneven governance maturity rather than a flat contradiction.",
             "The overall pattern is more consistent with a federated operating model with uneven governance maturity than with random hostname sprawl.",
         ]
     )
     lines.append(
-        r"The apparent arbitrariness is not best explained as disorder. It is better explained as the visible overlap of multiple valid naming systems created by different functions: brand presentation, service design, operational delivery, issuance control, and gradual migration."
+        r"The common ground is operational reality. A branded proposition wants recognisable names. A service team wants a stable endpoint namespace. A platform team wants shared rails and repeatable delivery machinery. A hosting team wants routable front doors that can land on cloud distribution, gateways, or workflow platforms. A security or PKI function wants some names tightly governed and other names left broad or delegated. Certificates, DNS, and CAA tell the same estate story from different angles."
     )
     lines.append(
-        r"The new CAA evidence sharpens that point rather than contradicting it. The same families that looked like managed rails from certificate naming and DNS landing often sit under narrower issuance policy as well. The main qualification is that governance is uneven. One configured public zone is policy-layered and governed, while another remains CAA-empty. That is not random chaos, but it is also not uniform control maturity."
+        r"A useful way to combine the layers is to ask four questions in order. First, what does the name itself look like: a direct front door, a numbered rail, an environment slice, or a bridge across business zones? Second, how broad is the SAN set: is this one visible service or a bundled platform certificate? Third, where does public DNS actually land the name: direct host, CDN edge, API gateway, campaign rail, or specialist platform? Fourth, does DNS issuance policy stay broad, narrow sharply, or disappear entirely?"
+    )
+    lines.append(
+        r"When those answers align, the reading becomes strong. A small-SAN branded name with ordinary inherited policy reads like a direct public front. A dense multi-zone certificate with numbered families, managed DNS landing, and narrower CAA reads like a shared operational rail. A name that lands on AWS but still uses a Sectigo-family certificate shows that hosting choice and CA choice are separate decisions. A name with current overlap and current policy mismatch shows a transition area where the newer issuance model is already in place but the older certificate state has not fully disappeared."
+    )
+    lines.append(
+        r"This is why the estate can look both tidy and messy at once. It is tidy within each layer, but messy across layers because the layers are solving different problems. The new CAA evidence sharpens that point rather than contradicting it: the managed rail families are not only named and hosted differently, they are often policy-controlled differently as well. The biggest qualification is that governance is uneven. The primary configured zone shows layered issuance control, while another configured zone remains CAA-empty. That is not random chaos, but it is also not uniform control maturity."
     )
 
     lines.append(r"\section{Limits, Confidence, and Noise}")
