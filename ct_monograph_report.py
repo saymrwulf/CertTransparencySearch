@@ -228,6 +228,15 @@ def overlap_signal(details: str) -> str:
     return truncate_text("; ".join(parts) if parts else details, 108)
 
 
+def example_pattern_label(title: str) -> str:
+    return {
+        "Shared operational rail": "Numbered fleet or operational-rail naming",
+        "Environment matrix certificate": "Environment-matrix and lifecycle naming",
+        "Clean public front door": "Public brand-entry naming",
+        "Cross-zone bridge": "Cross-zone bridge or shared-service naming",
+    }.get(title, "Naming pattern")
+
+
 def render_markdown(
     args: argparse.Namespace,
     report: dict[str, object],
@@ -571,11 +580,14 @@ def render_markdown(
     lines.append("")
     lines.append("### Key Pattern Examples")
     lines.append("")
+    lines.append("These four boxes are not four isolated hostnames. Each one uses a concrete Subject CN as the evidence anchor for a broader naming methodology that appears elsewhere in the estate as well.")
+    lines.append("")
     for example in report["examples"]:
         lines.append(f"#### {example.title}")
         lines.append("")
-        lines.append(f"- Subject CN: `{example.subject_cn}`")
-        lines.append(f"- Why this pattern matters: {example.why_it_matters}")
+        lines.append(f"- Pattern shown: {example_pattern_label(example.title)}.")
+        lines.append(f"- Concrete example: `{example.subject_cn}`")
+        lines.append(f"- What this proves: {example.why_it_matters}")
         for point in example.evidence:
             lines.append(f"- Evidence: {point}")
         lines.append("")
@@ -1226,11 +1238,15 @@ def render_latex(
     lines.append(
         r"The naming regime becomes intelligible when read as several superimposed languages: brand language, service language, environment language, platform language, and migration residue."
     )
+    lines.append(
+        r"These four boxes are not four isolated hostnames. Each one uses a concrete Subject-CN value as the evidence anchor for a broader naming methodology that appears elsewhere in the estate as well."
+    )
     for example in report["examples"]:
         lines.append(r"\SummaryBox{")
         lines.append(rf"\textbf{{{latex_escape(example.title)}}}\par")
-        lines.append(rf"\textbf{{Subject CN}}: \texttt{{{latex_escape(example.subject_cn)}}}\par")
-        lines.append(latex_escape(example.why_it_matters) + r"\par")
+        lines.append(rf"\textbf{{Pattern shown}}: {latex_escape(example_pattern_label(example.title))}\par")
+        lines.append(rf"\textbf{{Concrete example}}: \texttt{{{latex_escape(example.subject_cn)}}}\par")
+        lines.append(rf"\textbf{{What this proves}}: {latex_escape(example.why_it_matters)}\par")
         lines.append(r"\begin{itemize}[leftmargin=1.4em]")
         for point in example.evidence:
             lines.append(rf"\item {latex_escape(point)}")
