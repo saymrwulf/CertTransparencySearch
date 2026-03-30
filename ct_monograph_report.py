@@ -252,7 +252,7 @@ def delivery_pattern_meaning(label: str) -> str:
         "No public DNS (NXDOMAIN)": "The name contained in certificates does not currently exist in public DNS.",
         "No public address data": "The name exists in DNS, but no public A or AAAA address was returned during the scan.",
         "Dangling agency alias": "The name aliases to a third-party intermediary hostname that no longer resolves cleanly. That usually indicates stale or partially removed DNS.",
-    }.get(label, "Recurring public DNS landing pattern derived from the observed answer chain.")
+    }.get(label, "Recurring public DNS outcome derived from the observed answer chain.")
 
 
 def delivery_pattern_rule(label: str) -> str:
@@ -377,8 +377,8 @@ def render_markdown(
         [
             f"- **{len(hits)}** current leaf certificates are in scope on this run.",
             f"- **{len(groups)}** CN families reduce the estate into readable naming clusters.",
-            f"- **{purpose_summary.category_counts.get('tls_server_only', 0)}** certificates are strict TLS server certificates and **{purpose_summary.category_counts.get('tls_server_and_client', 0)}** are dual-EKU server-plus-client certificates.",
-            f"- **{historical_count}** historical leaf certificates show how these names evolved over time, including expired issuance lineages.",
+            f"- **{purpose_summary.category_counts.get('tls_server_only', 0)}** certificates are ordinary public TLS server certificates, while **{purpose_summary.category_counts.get('tls_server_and_client', 0)}** come from templates that also permit client-certificate use.",
+            f"- **{historical_count}** historical leaf certificates show how these names evolved over time, including expired renewal history.",
             f"- **{len(report['unique_dns_names'])}** unique DNS SAN names were scanned live.",
             "- The estate is best understood as several layers laid on top of one another: brand naming, service naming, platform naming, delivery-stack naming, and migration residue.",
         ]
@@ -403,16 +403,18 @@ def render_markdown(
     lines.append("")
     lines.extend(
         [
-            f"- Raw crt.sh identity rows currently matching the configured terms: {', '.join(f'{domain}={count}' for domain, count in report['raw_match_counts'].items())}.",
-            f"- The run used a candidate cap of {report['cap']}, so the query was complete rather than truncated.",
-            f"- Leaf-only verification retained {report['verification'].unique_leaf_certificates} certificates and rejected {report['verification'].non_leaf_filtered} CA-style certificates and {report['verification'].precertificate_poison_filtered} precertificate-poison objects.",
-            f"- SAN coverage exceptions for the configured search terms: {report['missing_matching_san']}.",
+            f"- The first broad crt.sh search returned {', '.join(f'{domain}={count} matching index rows' for domain, count in report['raw_match_counts'].items())}. Those rows are leads, not final certificate count.",
+            f"- The scanner was allowed to collect up to {report['cap']} candidate rows per search term. Because the live match counts stayed below that limit, nothing was silently cut off.",
+            f"- After downloading and parsing the actual certificate bodies, {report['verification'].unique_leaf_certificates} genuine leaf certificates remained. {report['verification'].non_leaf_filtered} CA-style certificates and {report['verification'].precertificate_poison_filtered} precertificate marker objects were rejected.",
+            f"- Certificates missing the searched-for domains in their DNS SANs after full parsing: {report['missing_matching_san']}.",
         ]
     )
     lines.append("")
     lines.append("This chapter answers the first and most important question: whether the report is built on a complete and trustworthy corpus. The scanner now checks the live raw match count before issuing the capped query. If the cap is too low, it fails instead of silently undercounting.")
     lines.append("")
-    lines.append("The search starts from Certificate Transparency, but the report does not trust the database row type alone. It loads the DER certificate, verifies that the object is not a precertificate, verifies that it is not a CA certificate, and then reads SAN, Subject CN, KeyUsage, and EKU from the certificate itself.")
+    lines.append("The first crt.sh row count is intentionally larger than the final certificate count because Certificate Transparency search results are index rows, not de-duplicated certificates. The report therefore reads the binary certificate body itself, removes duplicates, rejects CA certificates and precertificate marker objects, and only then builds the working corpus.")
+    lines.append("")
+    lines.append("In other words: this publication is not based on search-result snippets alone. It is based on the parsed X.509 certificate bodies.")
     lines.append("")
     lines.append("## Chapter 2: The Certificate Corpus")
     lines.append("")
@@ -421,9 +423,9 @@ def render_markdown(
     lines.extend(
         [
             f"- Issuer families by certificate count: {', '.join(f'{name} ({count})' for name, count in report['issuer_family_counts'].most_common())}.",
-            f"- Revocation state: {report['rev_counts'].get('not_revoked', 0)} not revoked and {report['rev_counts'].get('revoked', 0)} revoked.",
-            f"- Every Subject CN in the current corpus appears literally in the DNS SAN set.",
-            f"- All visible issuer CAs in this corpus are currently trusted for public WebPKI server authentication in the major trust contexts queried.",
+            f"- Revocation state in plain terms: {report['rev_counts'].get('not_revoked', 0)} certificates are not marked revoked, and {report['rev_counts'].get('revoked', 0)} were later marked invalid by their issuing CA before natural expiry.",
+            f"- For every current certificate, the main Subject CN hostname also appears literally in the DNS SAN list. The headline name on the certificate is therefore one of the real covered hostnames, not a decorative label.",
+            f"- All visible issuer families in this corpus are currently trusted by the major public browser and operating-system trust stores for ordinary web server use.",
         ]
     )
     lines.append("")
@@ -437,7 +439,7 @@ def render_markdown(
     lines.append("")
     lines.append("A WebPKI-trusted issuer is a certificate authority trusted by mainstream browser and operating-system trust stores for public TLS. That matters because it tells you these certificates are not part of a private PKI hidden inside one organisation. They are intended to be valid in the public Internet trust model.")
     lines.append("")
-    lines.append("This view should answer one question only: how many trust lineages are present in the estate. The exact subordinate issuer names are supporting evidence, so they stay in the appendix inventory rather than cluttering the main chapter.")
+    lines.append("This view should answer one question only: how many publicly trusted issuer families are present in the estate. The exact subordinate issuer names are supporting evidence, so they stay in the appendix inventory rather than cluttering the main chapter.")
     lines.append("")
     lines.append("## Chapter 3: Intended Purpose of the Certificates")
     lines.append("")
@@ -445,15 +447,13 @@ def render_markdown(
     lines.append("")
     lines.extend(
         [
-            f"- Strict `serverAuth` only: {purpose_summary.category_counts.get('tls_server_only', 0)}.",
-            f"- `serverAuth + clientAuth`: {purpose_summary.category_counts.get('tls_server_and_client', 0)}.",
-            "- `clientAuth` only: 0.",
-            "- S/MIME only: 0.",
-            "- code signing only: 0.",
+            f"- Certificates whose allowed purpose is ordinary server authentication only: {purpose_summary.category_counts.get('tls_server_only', 0)}.",
+            f"- Certificates whose policy allows both server use and client-certificate use: {purpose_summary.category_counts.get('tls_server_and_client', 0)}.",
+            "- Certificates dedicated only to client identity, email signing, or code signing: 0.",
         ]
     )
     lines.append("")
-    lines.append("This chapter addresses a key ambiguity. A certificate can be technically valid for several uses. The corpus was therefore assessed from the actual EKU and KeyUsage fields, not from the hostname style alone.")
+    lines.append("This chapter addresses a key ambiguity. A certificate can be technically valid for several uses, and the hostname alone does not settle that question. The corpus was therefore assessed from the X.509 usage fields themselves: EKU and KeyUsage.")
     lines.append("")
     lines.append("### Purpose Map")
     lines.append("")
@@ -479,7 +479,7 @@ def render_markdown(
     lines.append("")
     lines.append("### EKU and KeyUsage Templates")
     lines.append("")
-    lines.append("At the template level, the corpus is even simpler than the certificate count suggests. Only two EKU templates appear at all, and one KeyUsage template dominates almost completely.")
+    lines.append("At the template level, the corpus is even simpler than the certificate count suggests. Here, a template simply means a repeated combination of usage fields. Only two EKU combinations appear at all, and one KeyUsage pattern dominates almost completely.")
     lines.append("")
     lines.extend(md_table(["EKU Template", "Certificates", "Share"], eku_template_rows))
     lines.append("")
@@ -496,7 +496,7 @@ def render_markdown(
         ]
     )
     lines.append("")
-    lines.append("This majority bucket is not background noise. It is the main operational reality visible in the scan: public DNS names covered by publicly trusted endpoint certificates.")
+    lines.append("This majority group is not background noise. It is the main operational reality visible in the scan: public DNS names covered by publicly trusted endpoint certificates.")
     lines.append("")
     if dual_rows:
         lines.append("### The Minority Pattern: Dual EKU")
@@ -506,9 +506,9 @@ def render_markdown(
         lines.extend(
             [
                 f"- Dual-EKU certificates in this corpus: {dual_count}, or {pct(dual_count, total_certificates)} of the corpus.",
-                f"- Issuer-family concentration inside the dual-EKU bucket: {', '.join(f'{name} ({count})' for name, count in dual_issuer_counts.most_common())}.",
+                f"- Issuer-family concentration inside the dual-EKU group: {', '.join(f'{name} ({count})' for name, count in dual_issuer_counts.most_common())}.",
                 f"- Dual-EKU Subject CN families that also have a strict server-only sibling: {len(purpose_summary.dual_eku_subject_cns_with_server_only_sibling)}.",
-                f"- Dual-EKU Subject CN families that appear only in the dual-EKU bucket: {len(purpose_summary.dual_eku_subject_cns_without_server_only_sibling)}.",
+                f"- Dual-EKU Subject CN families that appear only in the dual-EKU group: {len(purpose_summary.dual_eku_subject_cns_without_server_only_sibling)}.",
                 f"- Dual-EKU validity starts are split between {', '.join(f'{year} ({count})' for year, count in purpose_summary.validity_start_years.get('tls_server_and_client', {}).items())}.",
             ]
         )
@@ -532,26 +532,28 @@ def render_markdown(
     lines.append("")
     lines.extend(
         [
-            f"- Historical leaf certificates in scope: {historical_count}, of which {historical_current_count} are still currently valid.",
-            f"- Subject CN values with more than one certificate over time: {repeated_cn_count}.",
-            f"- Renewal asset lineages with normal rollover overlap below 50 days: {assessment.normal_reissuance_assets}.",
-            f"- Current overlap red flags at 50 days or more: {len(assessment.overlap_current_rows)}.",
-            f"- Past-only overlap red flags now fixed: {len(assessment.overlap_past_rows)}.",
-            f"- Current Subject DN drift / CA lineage drift / SAN drift counts: {len(assessment.dn_current_rows)} / {len(assessment.vendor_current_rows)} / {len(assessment.san_current_rows)}.",
-            f"- Past-only Subject DN drift / CA lineage drift / SAN drift counts: {len(assessment.dn_past_rows)} / {len(assessment.vendor_past_rows)} / {len(assessment.san_past_rows)}.",
+            f"- Looking across expired and current history, the corpus contains {historical_count} leaf certificates; {historical_current_count} of them are still valid today.",
+            f"- {repeated_cn_count} Subject CN values recur over time rather than appearing as one-off singletons.",
+            f"- {assessment.normal_reissuance_assets} renewal families look operationally normal: predecessor and successor overlap for fewer than 50 days.",
+            f"- {len(assessment.overlap_current_rows)} names still show long overlap of 50 days or more today.",
+            f"- {len(assessment.overlap_past_rows)} names showed the same long-overlap behaviour in the past, but not anymore in currently valid certificates.",
+            f"- Current non-overlap anomalies are limited: {len(assessment.dn_current_rows)} live Subject DN drift cases, {len(assessment.vendor_current_rows)} live CA-family drift cases, and {len(assessment.san_current_rows)} live SAN-drift cases.",
+            f"- Past-only fixed anomalies were broader: {len(assessment.dn_past_rows)} historical Subject DN drift cases, {len(assessment.vendor_past_rows)} historical CA-family drift cases, and {len(assessment.san_past_rows)} historical SAN-drift cases.",
         ]
     )
     lines.append("")
-    lines.append("This chapter is the historical control layer for the whole publication. It answers a different question from the current-corpus chapters above: not just what certificates exist now, but how the hostname estate has behaved over time.")
+    lines.append("This chapter is the historical check on whether the current picture follows a clean renewal pattern. It answers a different question from the current-corpus chapters above: not just what certificates exist now, but how the hostname estate has behaved over time.")
     lines.append("")
-    lines.append("A normal renewal reissues what is essentially the same certificate asset with a new key and a new validity span, and predecessor and successor overlap only briefly. In this monograph, anything below 50 days of overlap is treated as normal. Fifty days or more is treated as a red flag. COMODO and Sectigo are treated as one CA lineage from the outset, so movement between those names is not counted here as lineage drift.")
+    lines.append("For this chapter, a renewal family means repeated certificates that keep the same apparent identity over time: the same Subject CN, the same full Subject DN, the same SAN profile, and the same CA family. A normal renewal reissues that same apparent certificate identity with a new key and a new validity span, and predecessor and successor overlap only briefly. In this monograph, anything below 50 days of overlap is treated as normal. Fifty days or more is treated as a red flag. COMODO and Sectigo are treated as one CA family from the outset, so movement between those names is not counted here as CA-family drift.")
+    lines.append("")
+    lines.append("A red flag in this chapter is not the same thing as a breach or a compromise. It means the certificate history diverged from the clean rollover pattern that one would normally expect and therefore deserves closer review.")
     lines.append("")
     lines.append("### Current Red-Flag Inventory")
     lines.append("")
     if assessment.current_red_flag_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Live Certs", "Current Concern", "Why It Lands On This List"],
+                ["Subject CN", "Live Certs", "Current Concern", "Immediate Supporting Context"],
                 [
                     [
                         row.subject_cn,
@@ -571,7 +573,7 @@ def render_markdown(
     if assessment.past_red_flag_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Historic Certs", "Historical Concern", "Why It Mattered"],
+                ["Subject CN", "Historic Certs", "Historical Concern", "Immediate Supporting Context"],
                 [
                     [
                         row.subject_cn,
@@ -588,15 +590,15 @@ def render_markdown(
     lines.append("")
     lines.append("### What The Historical Red Flags Mean")
     lines.append("")
-    lines.append("The two short tables above are triage views. They are meant to answer which names deserve attention now, and which names used to be problematic but no longer look live. The appendices below keep the narrower evidence tables that explain why each name is there.")
+    lines.append("The two short tables above are screening tables. They answer which names deserve attention now, and which names used to be problematic but no longer look live. The appendices below keep the narrower evidence tables that explain why each name is there.")
     lines.append("")
     lines.extend(
         [
-            f"- **Overlap red flag**: a predecessor and successor inside the same renewal asset lineage coexist for 50 days or more. Current cases: {len(assessment.overlap_current_rows)}. Past-only fixed cases: {len(assessment.overlap_past_rows)}.",
-            f"- **Subject DN drift**: the same Subject CN appears under more than one full Subject DN. Current cases: {len(assessment.dn_current_rows)}. Past-only fixed cases: {len(assessment.dn_past_rows)}.",
-            f"- **CA lineage drift**: the same Subject CN appears under more than one CA lineage, after collapsing COMODO and Sectigo together. Current cases: {len(assessment.vendor_current_rows)}. Past-only fixed cases: {len(assessment.vendor_past_rows)}.",
-            f"- **SAN drift**: the same Subject CN appears with more than one SAN profile. Current cases: {len(assessment.san_current_rows)}. Past-only fixed cases: {len(assessment.san_past_rows)}.",
-            f"- **Exact issuer changes** inside one lineage also exist: {len(assessment.issuer_rows)} Subject CN values. Those are tracked as context, not as first-order lineage red flags.",
+            f"- **Overlap red flag**: a predecessor and successor inside the same renewal family coexist for 50 days or more. Current cases: {len(assessment.overlap_current_rows)}. Past-only fixed cases: {len(assessment.overlap_past_rows)}.",
+            f"- **Subject DN drift**: the same Subject CN appears under more than one full Subject DN. In plain terms, the headline hostname is being issued under different formal subject identities. Current cases: {len(assessment.dn_current_rows)}. Past-only fixed cases: {len(assessment.dn_past_rows)}.",
+            f"- **CA-family drift**: the same Subject CN appears under more than one CA family, after collapsing COMODO and Sectigo together. Current cases: {len(assessment.vendor_current_rows)}. Past-only fixed cases: {len(assessment.vendor_past_rows)}.",
+            f"- **SAN drift**: the same Subject CN appears with more than one SAN profile. In plain terms, the hostname keeps being bundled with different companion names. Current cases: {len(assessment.san_current_rows)}. Past-only fixed cases: {len(assessment.san_past_rows)}.",
+            f"- **Exact issuer-name changes** inside one CA family also exist: {len(assessment.issuer_rows)} Subject CN values. Those are tracked as context, not as first-order red flags.",
         ]
     )
     lines.append("")
@@ -660,16 +662,18 @@ def render_markdown(
     lines.append("")
     lines.extend(
         [
-            f"- Most names resolve by first aliasing to another hostname and then to an address: {alias_to_address_count} alias-chain landings versus {direct_address_count} direct-address landings.",
-            f"- The dominant observed landing patterns are Adobe Campaign -> AWS ALB ({report['dns_stack_counts'].get('Adobe Campaign -> AWS ALB', 0)}), Adobe Campaign -> AWS CloudFront ({report['dns_stack_counts'].get('Adobe Campaign -> AWS CloudFront', 0)}), and AWS CloudFront without an Adobe layer ({report['dns_stack_counts'].get('AWS CloudFront', 0)}).",
-            f"- Smaller but important subsets look like governed API fronts or specialist application platforms: Google Apigee ({report['dns_stack_counts'].get('Google Apigee', 0)}) and Pega Cloud -> AWS ALB ({report['dns_stack_counts'].get('Pega Cloud -> AWS ALB', 0)}).",
-            f"- Not every certificate name still resolves publicly today: NXDOMAIN={nxdomain_count}, dangling alias={dangling_count}, no public address data={no_data_count}.",
+            f"- Most names resolve indirectly: {alias_to_address_count} public names first point to another hostname and only then reach an address, while only {direct_address_count} names resolve straight to an address.",
+            f"- The most common public DNS outcomes are Adobe Campaign in front of AWS load-balancing ({report['dns_stack_counts'].get('Adobe Campaign -> AWS ALB', 0)}), Adobe Campaign in front of AWS CloudFront ({report['dns_stack_counts'].get('Adobe Campaign -> AWS CloudFront', 0)}), and plain AWS CloudFront without an Adobe layer ({report['dns_stack_counts'].get('AWS CloudFront', 0)}).",
+            f"- Smaller but still meaningful subsets behave like managed API fronts or specialist application platforms: Google Apigee ({report['dns_stack_counts'].get('Google Apigee', 0)}) and Pega Cloud on AWS ({report['dns_stack_counts'].get('Pega Cloud -> AWS ALB', 0)}).",
+            f"- Some certificate names do not lead to a live public endpoint today: {nxdomain_count} do not exist in public DNS at all, {dangling_count} still exist only as broken aliases, and {no_data_count} exist in DNS but returned no public A or AAAA address during the scan.",
         ]
     )
     lines.append("")
     lines.append("DNS is the public routing layer. It does not tell you everything about an application, but it does tell you where a public name lands: directly on an IP, through an alias chain, through a CDN, through an API gateway, or onto a specialist platform.")
     lines.append("")
-    lines.append("This chapter does not claim to know the full private architecture behind each service. It only claims what the public DNS trail supports. For each DNS SAN name in the certificate corpus, the scanner queried public `CNAME`, `A`, `AAAA`, and `PTR` data. It then reduced the observed answer trail into a short label. Those labels are not arbitrary brand names invented by the report; they are compact descriptions of what the public DNS evidence most strongly suggests.")
+    lines.append("This chapter does not claim to know the full private architecture behind each service. It only claims what the public DNS trail supports. For each DNS SAN name in the certificate corpus, the scanner queried public `CNAME`, `A`, `AAAA`, and `PTR` data. It then summarized that public answer trail with a short label. Those labels are not arbitrary brand names invented by the report; they are compact descriptions of what the public DNS evidence most strongly suggests.")
+    lines.append("")
+    lines.append("One important caution follows from that last bullet: a hostname can remain visible in certificate history even after its public DNS has been removed or partially dismantled. Certificate history and current DNS are related, but they do not move in lockstep.")
     lines.append("")
     lines.append("### How The DNS Evidence Is Read")
     lines.append("")
@@ -682,11 +686,11 @@ def render_markdown(
         ]
     )
     lines.append("")
-    lines.append("### Observed Public DNS Landing Patterns")
+    lines.append("### What The Public DNS Names Resolve To")
     lines.append("")
-    lines.extend(md_table(["Observed Pattern", "Count", "Plain-Language Meaning"], dns_pattern_rows))
+    lines.extend(md_table(["Observed DNS Outcome", "Count", "Plain-Language Meaning"], dns_pattern_rows))
     lines.append("")
-    lines.append("### How The Main Labels Were Assigned")
+    lines.append("### Why Each DNS Label Was Used")
     lines.append("")
     for label, _count in top_dns_patterns[:6]:
         lines.append(f"- **{label}**: {delivery_pattern_rule(label)}")
@@ -697,7 +701,7 @@ def render_markdown(
     for term in ["Adobe Campaign", "AWS", "AWS ALB", "AWS CloudFront", "Google Apigee", "Pega Cloud", "Microsoft Edge", "Infinite / agency alias", "CNAME", "A record", "AAAA record", "PTR record", "NXDOMAIN"]:
         lines.append(f"- **{term}**: {glossary[term]}")
     lines.append("")
-    lines.append("The glossary terms above are the building blocks used in the landing-pattern table. The important thing is not the vendor name by itself. The important thing is the role implied by the DNS path: CloudFront suggests a distribution edge, Apigee suggests managed API exposure, Adobe Campaign suggests a marketing or communications front, and a load balancer suggests traffic distribution to backend services.")
+    lines.append("The glossary terms above are the building blocks used in the DNS-outcome table. This is also why the management summary mentions Adobe Campaign, CloudFront, Apigee, and Pega at all: not because brand names are the point, but because those names reveal what kind of public delivery role a hostname is landing on. CloudFront suggests a distribution edge, Apigee suggests managed API exposure, Adobe Campaign suggests a marketing or communications front, and a load balancer suggests traffic distribution to backend services.")
     lines.append("")
     lines.append("## Chapter 7: Making The Whole Estate Make Sense")
     lines.append("")
@@ -729,7 +733,7 @@ def render_markdown(
         ]
     )
     lines.append("")
-    lines.append("A useful way to read the corpus is to separate signal from noise. Repeated naming schemas are signal. Repeated DNS landing patterns are signal. Public trust lineage is signal. Simple `www` presence or absence is weak evidence either way unless it coincides with stronger differences such as distinct DNS routing, distinct SAN composition, or a distinct certificate lineage.")
+    lines.append("A useful way to read the corpus is to separate signal from noise. Repeated naming schemas are signal. Repeated DNS outcomes are signal. Which public CA family keeps issuing a name is signal. Simple `www` presence or absence is weak evidence either way unless it coincides with stronger differences such as distinct DNS routing, distinct SAN composition, or a distinct certificate renewal history.")
     lines.append("")
     lines.append("## Appendix A: Full Family Catalogue")
     lines.append("")
@@ -740,6 +744,8 @@ def render_markdown(
     lines.append("## Appendix B: Historical Red-Flag Detail")
     lines.append("")
     lines.append("This appendix keeps the detailed historical evidence inside the monograph so that the reader does not need a second report. Each subsection answers one narrow question. If a column does not help answer that question, it has been removed.")
+    lines.append("")
+    lines.append("In this appendix, a *renewal family* means repeated certificates that keep the same apparent identity over time: the same Subject CN, the same full Subject DN, the same SAN profile, and the same CA family.")
     lines.append("")
     lines.append("### B.1 Current Red-Flag Inventory")
     lines.append("")
@@ -786,7 +792,7 @@ def render_markdown(
     if assessment.overlap_current_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Max Overlap Days", "Live Certs", "Renewal Asset Signal"],
+                ["Subject CN", "Max Overlap Days", "Live Certs", "What The Renewal Family Looks Like"],
                 [
                     [
                         row.subject_cn,
@@ -806,7 +812,7 @@ def render_markdown(
     if assessment.overlap_past_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Max Overlap Days", "Historic Certs", "Renewal Asset Signal"],
+                ["Subject CN", "Max Overlap Days", "Historic Certs", "What The Renewal Family Looks Like"],
                 [
                     [
                         row.subject_cn,
@@ -861,12 +867,12 @@ def render_markdown(
     else:
         lines.append("No past-only Subject DN drift was found.")
     lines.append("")
-    lines.append("### B.7 Current CA Lineage Drift")
+    lines.append("### B.7 Current CA-Family Drift")
     lines.append("")
     if assessment.vendor_current_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Distinct Lineages", "Live Certs", "Lineages Seen"],
+                ["Subject CN", "Distinct CA Families", "Live Certs", "CA Families Seen"],
                 [
                     [
                         row.subject_cn,
@@ -879,14 +885,14 @@ def render_markdown(
             )
         )
     else:
-        lines.append("No current CA lineage drift was found.")
+        lines.append("No current CA-family drift was found.")
     lines.append("")
-    lines.append("### B.8 Past CA Lineage Drift Now Fixed")
+    lines.append("### B.8 Past CA-Family Drift Now Fixed")
     lines.append("")
     if assessment.vendor_past_rows:
         lines.extend(
             md_table(
-                ["Subject CN", "Distinct Lineages", "Historic Certs", "Lineages Seen"],
+                ["Subject CN", "Distinct CA Families", "Historic Certs", "CA Families Seen"],
                 [
                     [
                         row.subject_cn,
@@ -899,7 +905,7 @@ def render_markdown(
             )
         )
     else:
-        lines.append("No past-only CA lineage drift was found.")
+        lines.append("No past-only CA-family drift was found.")
     lines.append("")
     lines.append("### B.9 Current SAN Drift")
     lines.append("")
@@ -1085,8 +1091,8 @@ def render_latex(
         + rf"\textbf{{Headline}}: {len(hits)} leaf certificates, {len(groups)} CN families, "
         + rf"{historical_count} historical leaf certificates, "
         + rf"{len(report['unique_dns_names'])} DNS names, "
-        + rf"{purpose_summary.category_counts.get('tls_server_only', 0)} strict server-auth certificates, "
-        + rf"{purpose_summary.category_counts.get('tls_server_and_client', 0)} dual-EKU certificates."
+        + rf"{purpose_summary.category_counts.get('tls_server_only', 0)} ordinary public TLS server certificates, "
+        + rf"{purpose_summary.category_counts.get('tls_server_and_client', 0)} certificates from templates that also permit client-certificate use."
         + r"}",
         r"\end{titlepage}",
         r"\tableofcontents",
@@ -1105,7 +1111,7 @@ def render_latex(
         [
             f"{len(hits)} current leaf certificates are in scope on this run.",
             f"{len(groups)} CN families reduce the estate into readable naming clusters.",
-            f"{purpose_summary.category_counts.get('tls_server_only', 0)} certificates are strict server-auth and {purpose_summary.category_counts.get('tls_server_and_client', 0)} are dual-EKU.",
+            f"{purpose_summary.category_counts.get('tls_server_only', 0)} certificates are ordinary public TLS server certificates, while {purpose_summary.category_counts.get('tls_server_and_client', 0)} come from templates that also permit client-certificate use.",
             f"{historical_count} historical leaf certificates show how the same names evolved over time.",
             f"{len(report['unique_dns_names'])} DNS SAN names were scanned live.",
             "The estate is best understood as layers of branding, service naming, platform naming, and delivery naming rather than as random clutter.",
@@ -1131,24 +1137,33 @@ def render_latex(
     lines.append(r"\section{Scope, Completeness, and Proof}")
     add_summary(
         [
-            f"Raw crt.sh identity rows currently matching the configured terms are {', '.join(f'{domain}={count}' for domain, count in report['raw_match_counts'].items())}.",
-            f"The run used a candidate cap of {report['cap']} and therefore did not truncate.",
-            f"Leaf-only verification retained {report['verification'].unique_leaf_certificates} certificates.",
-            f"Configured-term SAN coverage failures: {report['missing_matching_san']}.",
+            f"The first broad crt.sh search returned {', '.join(f'{domain}={count} matching index rows' for domain, count in report['raw_match_counts'].items())}. Those rows are leads, not final certificate count.",
+            f"The scanner was allowed to collect up to {report['cap']} candidate rows per search term. Because the live match counts stayed below that limit, nothing was silently cut off.",
+            f"After downloading and parsing the actual certificate bodies, {report['verification'].unique_leaf_certificates} genuine leaf certificates remained. {report['verification'].non_leaf_filtered} CA-style certificates and {report['verification'].precertificate_poison_filtered} precertificate marker objects were rejected.",
+            f"Certificates missing the searched-for domains in their DNS SANs after full parsing: {report['missing_matching_san']}.",
         ]
     )
     lines.append(
-        r"The scanner now checks the live raw match count before issuing the capped query. If the cap is too low, it refuses to proceed. This prevents the silent undercounting that can happen when a raw identity search is larger than the cap."
+        r"This chapter answers the first and most important question: whether the report is built on a complete and trustworthy corpus. The scanner now checks the live raw match count before issuing the capped query. If the cap is too low, it fails instead of silently undercounting."
+    )
+    lines.append(
+        r"The first crt.sh row count is intentionally larger than the final certificate count because Certificate Transparency search results are index rows, not de-duplicated certificates. The report therefore reads the binary certificate body itself, removes duplicates, rejects CA certificates and precertificate marker objects, and only then builds the working corpus."
+    )
+    lines.append(
+        r"In other words: this publication is not based on search-result snippets alone. It is based on the parsed X.509 certificate bodies."
     )
 
     lines.append(r"\section{The Certificate Corpus}")
     add_summary(
         [
-            f"Issuer families by count are {', '.join(f'{name} ({count})' for name, count in report['issuer_family_counts'].most_common())}.",
-            f"Revocation state is not revoked={report['rev_counts'].get('not_revoked', 0)}, revoked={report['rev_counts'].get('revoked', 0)}, unknown={report['rev_counts'].get('unknown', 0)}.",
-            "All Subject CN values appear literally in the DNS SAN set.",
-            f"All {sum(1 for info in issuer_trust.values() if info.major_webpki)} issuer entries are major-store WebPKI trusted for server authentication.",
+            f"Issuer families by certificate count are {', '.join(f'{name} ({count})' for name, count in report['issuer_family_counts'].most_common())}.",
+            f"Revocation state in plain terms: {report['rev_counts'].get('not_revoked', 0)} certificates are not marked revoked, and {report['rev_counts'].get('revoked', 0)} were later marked invalid by their issuing CA before natural expiry.",
+            "For every current certificate, the main Subject CN hostname also appears literally in the DNS SAN list. The headline name on the certificate is therefore one of the real covered hostnames, not a decorative label.",
+            "All visible issuer families in this corpus are currently trusted by the major public browser and operating-system trust stores for ordinary web server use.",
         ]
+    )
+    lines.append(
+        r"A certificate corpus can look random when viewed as a flat list. It becomes intelligible once you group it by issuer family, Subject CN construction, validity history, and SAN design. That is why the appendices are arranged as families rather than raw rows."
     )
     lines.extend(
         [
@@ -1162,20 +1177,25 @@ def render_latex(
     for row in issuer_family_rows:
         lines.append(
             rf"{latex_escape(row['family'])} & {row['certificates']} & {row['variant_count']} & {row['major_webpki']} \\"
-        )
+    )
     lines.extend([r"\bottomrule", r"\end{longtable}"])
     lines.append(
-        r"This view should answer one question only: how many trust lineages are present in the estate. Exact subordinate issuer names are supporting evidence and remain in the detailed inventory appendix."
+        r"\textbf{What WebPKI trust means.} A WebPKI-trusted issuer is a certificate authority trusted by mainstream browser and operating-system trust stores for public TLS. That matters because it tells you these certificates are not part of a private PKI hidden inside one organisation. They are intended to be valid in the public Internet trust model."
+    )
+    lines.append(
+        r"This view should answer one question only: how many publicly trusted issuer families are present in the estate. Exact subordinate issuer names are supporting evidence and remain in the detailed inventory appendix."
     )
 
     lines.append(r"\section{Intended Purpose of the Certificates}")
     add_summary(
         [
-            f"Strict server-only certificates: {purpose_summary.category_counts.get('tls_server_only', 0)}.",
-            f"Server-plus-client certificates: {purpose_summary.category_counts.get('tls_server_and_client', 0)}.",
-            "Client-auth-only, S/MIME, and code-signing certificates: 0.",
-            "The corpus is entirely TLS-capable and does not contain an independent email-signing or software-signing estate.",
+            f"Certificates whose allowed purpose is ordinary server authentication only: {purpose_summary.category_counts.get('tls_server_only', 0)}.",
+            f"Certificates whose policy allows both server use and client-certificate use: {purpose_summary.category_counts.get('tls_server_and_client', 0)}.",
+            "Certificates dedicated only to client identity, email signing, or code signing: 0.",
         ]
+    )
+    lines.append(
+        r"This chapter addresses a key ambiguity. A certificate can be technically valid for several uses, and the hostname alone does not settle that question. The corpus was therefore assessed from the X.509 usage fields themselves: EKU and KeyUsage."
     )
     lines.append(
         r"Extended Key Usage tells software what a certificate is allowed to do. In plain terms, this is the difference between a website certificate, a client-identity certificate, an email certificate, and a code-signing certificate."
@@ -1200,10 +1220,16 @@ def render_latex(
     lines.append(
         r"The basic picture is simple: the corpus is overwhelmingly made of ordinary public TLS server certificates, with a smaller minority whose EKU also permits client-certificate use."
     )
+    lines.append(
+        r"\textbf{Plain-language explanation of the usage categories.} A TLS server certificate is what a website or API presents to a browser, app, or machine client. A server-and-client certificate is one whose policy allows both server use and client-certificate use. That does not automatically mean it is actually used as a client certificate, but it leaves that door open. Client-auth-only certificates are what you would expect for a user, robot, or agent identity in mutual TLS. S/MIME means email signing or encryption. Code-signing means software signing rather than endpoint security."
+    )
+    lines.append(
+        r"The result is clean. This corpus is entirely TLS-capable. There is no evidence of a separate S/MIME or code-signing estate, and there are no client-auth-only certificates."
+    )
     lines.extend(
         [
             r"\subsection{EKU and KeyUsage Templates}",
-            r"At the template level, the corpus is even simpler than the certificate count suggests. Only two EKU templates appear at all, and one KeyUsage template dominates almost completely.",
+            r"At the template level, the corpus is even simpler than the certificate count suggests. Here, a template simply means a repeated combination of usage fields. Only two EKU combinations appear at all, and one KeyUsage pattern dominates almost completely.",
             r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.58\linewidth} >{\raggedleft\arraybackslash}p{0.14\linewidth} >{\raggedleft\arraybackslash}p{0.14\linewidth}}",
             r"\toprule",
             r"EKU Template & Certs & Share \\",
@@ -1231,15 +1257,15 @@ def render_latex(
             rf"Server-only validity starts are split between {latex_escape(', '.join(f'{year} ({count})' for year, count in purpose_summary.validity_start_years.get('tls_server_only', {}).items()))}.",
             rf"Server-only issuer-family concentration is {latex_escape(', '.join(f'{name} ({count})' for name, count in server_only_issuer_families.most_common()))}.",
             r"This is the normal public WebPKI server-certificate pattern for websites, APIs, and edge service front doors.",
-            r"This majority bucket is not background noise. It is the main operational reality visible in the scan: public DNS names covered by publicly trusted endpoint certificates.",
+            r"This majority group is not background noise. It is the main operational reality visible in the scan: public DNS names covered by publicly trusted endpoint certificates.",
         ]
     )
     lines.extend(
         [
             r"\subsection{The Minority Pattern: Dual EKU}",
             rf"In this corpus, {dual_count} certificates carry both \texttt{{serverAuth}} and \texttt{{clientAuth}} in Extended Key Usage. That is {latex_escape(pct(dual_count, total_certificates))} of the corpus. This means the certificate is \emph{{allowed}} to be used in either role. It does not prove that the certificate is actually being used as a client identity in production.",
-            rf"The dual-EKU bucket is concentrated in these issuer families: {latex_escape(', '.join(f'{name} ({count})' for name, count in dual_issuer_counts.most_common()))}.",
-            rf"{len(purpose_summary.dual_eku_subject_cns_with_server_only_sibling)} dual-EKU Subject-CN families also have a strict server-only sibling, while {len(purpose_summary.dual_eku_subject_cns_without_server_only_sibling)} currently appear only in the dual-EKU bucket.",
+            rf"The dual-EKU group is concentrated in these issuer families: {latex_escape(', '.join(f'{name} ({count})' for name, count in dual_issuer_counts.most_common()))}.",
+            rf"{len(purpose_summary.dual_eku_subject_cns_with_server_only_sibling)} dual-EKU Subject-CN families also have a strict server-only sibling, while {len(purpose_summary.dual_eku_subject_cns_without_server_only_sibling)} currently appear only in the dual-EKU group.",
             rf"Dual-EKU validity starts are split between {latex_escape(', '.join(f'{year} ({count})' for year, count in purpose_summary.validity_start_years.get('tls_server_and_client', {}).items()))}.",
             r"The important interpretation point is that these still look like public hostname certificates: DNS-style Subject CN values, DNS SAN lists, and public WebPKI issuers. The better reading is therefore not ``separate client-certificate estate'', but ``server certificates issued from a template that also allowed clientAuth''.",
             r"\subsection{What Is Not Present}",
@@ -1250,17 +1276,23 @@ def render_latex(
     lines.append(r"\section{Historical Renewal, Drift, and Red Flags}")
     add_summary(
         [
-            f"Historical leaf certificates in scope: {historical_count}, of which {historical_current_count} are still currently valid.",
-            f"Subject CN values with more than one certificate over time: {repeated_cn_count}.",
-            f"Renewal asset lineages with normal rollover overlap below 50 days: {assessment.normal_reissuance_assets}.",
-            f"Current overlap red flags at 50 days or more: {len(assessment.overlap_current_rows)}.",
-            f"Past-only overlap red flags now fixed: {len(assessment.overlap_past_rows)}.",
-            f"Current Subject DN drift / CA lineage drift / SAN drift counts: {len(assessment.dn_current_rows)} / {len(assessment.vendor_current_rows)} / {len(assessment.san_current_rows)}.",
-            f"Past-only Subject DN drift / CA lineage drift / SAN drift counts: {len(assessment.dn_past_rows)} / {len(assessment.vendor_past_rows)} / {len(assessment.san_past_rows)}.",
+            f"Looking across expired and current history, the corpus contains {historical_count} leaf certificates; {historical_current_count} of them are still valid today.",
+            f"{repeated_cn_count} Subject CN values recur over time rather than appearing as one-off singletons.",
+            f"{assessment.normal_reissuance_assets} renewal families look operationally normal: predecessor and successor overlap for fewer than 50 days.",
+            f"{len(assessment.overlap_current_rows)} names still show long overlap of 50 days or more today.",
+            f"{len(assessment.overlap_past_rows)} names showed the same long-overlap behaviour in the past, but not anymore in currently valid certificates.",
+            f"Current non-overlap anomalies are limited: {len(assessment.dn_current_rows)} live Subject DN drift cases, {len(assessment.vendor_current_rows)} live CA-family drift cases, and {len(assessment.san_current_rows)} live SAN drift cases.",
+            f"Past-only fixed anomalies were broader: {len(assessment.dn_past_rows)} historical Subject DN drift cases, {len(assessment.vendor_past_rows)} historical CA-family drift cases, and {len(assessment.san_past_rows)} historical SAN drift cases.",
         ]
     )
     lines.append(
-        r"This chapter is the historical control layer for the whole publication. A normal renewal reissues what is essentially the same certificate asset with a new key and a new validity span, and predecessor and successor overlap only briefly. In this monograph, anything below fifty days of overlap is treated as normal. Fifty days or more is treated as a red flag. COMODO and Sectigo are treated as one CA lineage from the outset, so movement between those names is not counted as lineage drift here."
+        r"This chapter is the historical check on whether the current picture follows a clean renewal pattern. It answers a different question from the current-corpus chapters above: not just what certificates exist now, but how the hostname estate has behaved over time."
+    )
+    lines.append(
+        r"For this chapter, a renewal family means repeated certificates that keep the same apparent identity over time: the same Subject CN, the same full Subject DN, the same SAN profile, and the same CA family. A normal renewal reissues that same apparent certificate identity with a new key and a new validity span, and predecessor and successor overlap only briefly. In this monograph, anything below fifty days of overlap is treated as normal. Fifty days or more is treated as a red flag. COMODO and Sectigo are treated as one CA family from the outset, so movement between those names is not counted here as CA-family drift."
+    )
+    lines.append(
+        r"A red flag in this chapter is not the same thing as a breach or a compromise. It means the certificate history diverged from the clean rollover pattern that one would normally expect and therefore deserves closer review."
     )
     lines.extend(
         [
@@ -1272,7 +1304,7 @@ def render_latex(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedright\arraybackslash}p{0.29\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Live Certs & Current Concern & Why It Lands On This List \\",
+                r"Subject CN & Live Certs & Current Concern & Immediate Supporting Context \\",
                 r"\midrule",
             ]
         )
@@ -1289,7 +1321,7 @@ def render_latex(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedright\arraybackslash}p{0.29\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Historic Certs & Historical Concern & Why It Mattered \\",
+                r"Subject CN & Historic Certs & Historical Concern & Immediate Supporting Context \\",
                 r"\midrule",
             ]
         )
@@ -1303,12 +1335,12 @@ def render_latex(
     lines.extend(
         [
             r"\subsection{What The Historical Red Flags Mean}",
-            r"The two short tables above are triage views. They answer which names deserve attention now and which names used to be problematic but no longer look live. The appendix below keeps the narrower evidence tables that explain why each name appears here.",
-            rf"Overlap red flags mean predecessor and successor certificates inside the same renewal asset lineage coexist for fifty days or more. Current cases: {len(assessment.overlap_current_rows)}. Past-only fixed cases: {len(assessment.overlap_past_rows)}.",
-            rf"Subject-DN drift means the same Subject CN appears under more than one full Subject DN. Current cases: {len(assessment.dn_current_rows)}. Past-only fixed cases: {len(assessment.dn_past_rows)}.",
-            rf"CA-lineage drift means the same Subject CN appears under more than one CA lineage after collapsing COMODO and Sectigo together. Current cases: {len(assessment.vendor_current_rows)}. Past-only fixed cases: {len(assessment.vendor_past_rows)}.",
-            rf"SAN drift means the same Subject CN appears with more than one SAN profile. Current cases: {len(assessment.san_current_rows)}. Past-only fixed cases: {len(assessment.san_past_rows)}.",
-            rf"Exact issuer-name changes also exist for {len(assessment.issuer_rows)} Subject CN values, but these are supporting context rather than first-order lineage red flags.",
+            r"The two short tables above are screening tables. They answer which names deserve attention now and which names used to be problematic but no longer look live. The appendix below keeps the narrower evidence tables that explain why each name appears here.",
+            rf"Overlap red flags mean predecessor and successor certificates inside the same renewal family coexist for fifty days or more. Current cases: {len(assessment.overlap_current_rows)}. Past-only fixed cases: {len(assessment.overlap_past_rows)}.",
+            rf"Subject-DN drift means the same Subject CN appears under more than one full Subject DN. In plain terms, the headline hostname is being issued under different formal subject identities. Current cases: {len(assessment.dn_current_rows)}. Past-only fixed cases: {len(assessment.dn_past_rows)}.",
+            rf"CA-family drift means the same Subject CN appears under more than one CA family after collapsing COMODO and Sectigo together. Current cases: {len(assessment.vendor_current_rows)}. Past-only fixed cases: {len(assessment.vendor_past_rows)}.",
+            rf"SAN drift means the same Subject CN appears with more than one SAN profile. In plain terms, the hostname keeps being bundled with different companion names. Current cases: {len(assessment.san_current_rows)}. Past-only fixed cases: {len(assessment.san_past_rows)}.",
+            rf"Exact issuer-name changes also exist for {len(assessment.issuer_rows)} Subject CN values, but these are supporting context rather than first-order red flags.",
             r"\subsection{Historical Step Changes}",
             rf"Top issuance start dates are {latex_escape(', '.join(f'{row.start_day} ({row.certificate_count})' for row in assessment.day_rows[:6]))}.",
             rf"Strong step weeks are {latex_escape(', '.join(f'{row.week_start} ({row.certificate_count} vs prior avg {row.prior_eight_week_avg})' for row in assessment.week_rows[:4]) or 'none')}.",
@@ -1363,14 +1395,20 @@ def render_latex(
     lines.append(r"\section{DNS Delivery Architecture}")
     add_summary(
         [
-            f"Most names resolve by first aliasing to another hostname and then to an address: {alias_to_address_count} alias-chain landings versus {direct_address_count} direct-address landings.",
-            f"The dominant observed landing patterns are Adobe Campaign -> AWS ALB ({report['dns_stack_counts'].get('Adobe Campaign -> AWS ALB', 0)}), Adobe Campaign -> AWS CloudFront ({report['dns_stack_counts'].get('Adobe Campaign -> AWS CloudFront', 0)}), and AWS CloudFront without an Adobe layer ({report['dns_stack_counts'].get('AWS CloudFront', 0)}).",
+            f"Most names resolve by first aliasing to another hostname and then to an address: {alias_to_address_count} public names follow an alias chain, while {direct_address_count} names resolve straight to an address.",
+            f"The most common public DNS outcomes are Adobe Campaign in front of AWS load-balancing ({report['dns_stack_counts'].get('Adobe Campaign -> AWS ALB', 0)}), Adobe Campaign in front of AWS CloudFront ({report['dns_stack_counts'].get('Adobe Campaign -> AWS CloudFront', 0)}), and plain AWS CloudFront without an Adobe layer ({report['dns_stack_counts'].get('AWS CloudFront', 0)}).",
             f"Smaller but important subsets look like governed API fronts or specialist application platforms: Google Apigee ({report['dns_stack_counts'].get('Google Apigee', 0)}) and Pega Cloud -> AWS ALB ({report['dns_stack_counts'].get('Pega Cloud -> AWS ALB', 0)}).",
-            f"Not every certificate name still resolves publicly today: NXDOMAIN={nxdomain_count}, dangling alias={dangling_count}, no public address data={no_data_count}.",
+            f"Some certificate names do not lead to a live public endpoint today: {nxdomain_count} do not exist in public DNS at all, {dangling_count} still exist only as broken aliases, and {no_data_count} exist in DNS but returned no public A or AAAA address during the scan.",
         ]
     )
     lines.append(
-        r"This chapter does not claim to know the full private architecture behind each service. It only claims what the public DNS trail supports. For each DNS SAN name in the certificate corpus, the scanner queried public \texttt{CNAME}, \texttt{A}, \texttt{AAAA}, and \texttt{PTR} data. It then reduced the observed answer trail into a short label. Those labels are compact descriptions of the public DNS evidence, not arbitrary platform slogans."
+        r"DNS is the public routing layer. It does not tell you everything about an application, but it does tell you where a public name lands: directly on an IP, through an alias chain, through a CDN, through an API gateway, or onto a specialist platform."
+    )
+    lines.append(
+        r"This chapter does not claim to know the full private architecture behind each service. It only claims what the public DNS trail supports. For each DNS SAN name in the certificate corpus, the scanner queried public \texttt{CNAME}, \texttt{A}, \texttt{AAAA}, and \texttt{PTR} data. It then summarized that public answer trail with a short label. Those labels are compact descriptions of the public DNS evidence, not arbitrary platform slogans."
+    )
+    lines.append(
+        r"One important caution follows from that last point: a hostname can remain visible in certificate history even after its public DNS has been removed or partially dismantled. Certificate history and current DNS are related, but they do not move in lockstep."
     )
     lines.extend(
         [
@@ -1381,10 +1419,10 @@ def render_latex(
             r"\item The report combines the answer shape and those clues into one short description. For example, ``Adobe Campaign -> AWS ALB'' means the alias chain contains Adobe Campaign naming and the terminal clues point to AWS load-balancing infrastructure.",
             r"\item These labels are therefore evidence summaries, not claims of legal ownership or full internal design.",
             r"\end{itemize}",
-            r"\subsection{Observed Public DNS Landing Patterns}",
+            r"\subsection{What The Public DNS Names Resolve To}",
             r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.51\linewidth}}",
             r"\toprule",
-            r"Observed Pattern & Count & Plain-Language Meaning \\",
+            r"Observed DNS Outcome & Count & Plain-Language Meaning \\",
             r"\midrule",
         ]
     )
@@ -1393,7 +1431,7 @@ def render_latex(
     lines.extend([r"\bottomrule", r"\end{longtable}"])
     lines.extend(
         [
-            r"\subsection{How The Main Labels Were Assigned}",
+            r"\subsection{Why Each DNS Label Was Used}",
             r"\begin{itemize}[leftmargin=1.4em]",
         ]
     )
@@ -1414,7 +1452,7 @@ def render_latex(
         lines.append(rf"{latex_escape(term)} & {latex_escape(glossary[term])} \\")
     lines.extend([r"\bottomrule", r"\end{longtable}"])
     lines.append(
-        r"The glossary terms above are the building blocks used in the landing-pattern table. The important thing is not the vendor name by itself. The important thing is the role implied by the DNS path: CloudFront suggests a distribution edge, Apigee suggests managed API exposure, Adobe Campaign suggests a marketing or communications front, and a load balancer suggests traffic distribution to backend services."
+        r"The glossary terms above are the building blocks used in the DNS-outcome table. This is also why the management summary mentions Adobe Campaign, CloudFront, Apigee, and Pega at all: not because brand names are the point, but because those names reveal what kind of public delivery role a hostname is landing on. CloudFront suggests a distribution edge, Apigee suggests managed API exposure, Adobe Campaign suggests a marketing or communications front, and a load balancer suggests traffic distribution to backend services."
     )
 
     lines.append(r"\section{Making The Whole Estate Make Sense}")
@@ -1440,7 +1478,7 @@ def render_latex(
         ]
     )
     lines.append(
-        r"A useful way to read the corpus is to separate signal from noise. Repeated naming schemas are signal. Repeated DNS landing patterns are signal. Public trust lineage is signal. Simple \texttt{www} presence or absence is weak evidence either way unless it coincides with stronger differences such as distinct DNS routing, distinct SAN composition, or a distinct certificate lineage."
+        r"A useful way to read the corpus is to separate signal from noise. Repeated naming schemas are signal. Repeated DNS outcomes are signal. Which public CA family keeps issuing a name is signal. Simple \texttt{www} presence or absence is weak evidence either way unless it coincides with stronger differences such as distinct DNS routing, distinct SAN composition, or a distinct certificate renewal history."
     )
 
     lines.extend(
@@ -1464,6 +1502,7 @@ def render_latex(
         [
             r"\section{Historical Red-Flag Detail}",
             r"This appendix keeps the detailed historical evidence inside the monograph so that the reader does not need a second report. Each subsection answers one narrow question. If a column does not help answer that question, it has been removed.",
+            r"In this appendix, a renewal family means repeated certificates that keep the same apparent identity over time: the same Subject CN, the same full Subject DN, the same SAN profile, and the same CA family.",
             r"\subsection{Current Red-Flag Inventory}",
         ]
     )
@@ -1506,7 +1545,7 @@ def render_latex(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.48\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Max Overlap Days & Live Certs & Renewal Asset Signal \\",
+                r"Subject CN & Max Overlap Days & Live Certs & What The Renewal Family Looks Like \\",
                 r"\midrule",
             ]
         )
@@ -1523,7 +1562,7 @@ def render_latex(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.47\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Max Overlap Days & Historic Certs & Renewal Asset Signal \\",
+                r"Subject CN & Max Overlap Days & Historic Certs & What The Renewal Family Looks Like \\",
                 r"\midrule",
             ]
         )
@@ -1568,13 +1607,13 @@ def render_latex(
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No past-only Subject-DN drift was found.")
-    lines.append(r"\subsection{Current CA-Lineage Drift}")
+    lines.append(r"\subsection{Current CA-Family Drift}")
     if assessment.vendor_current_rows:
         lines.extend(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.42\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Distinct Lineages & Live Certs & Lineages Seen \\",
+                r"Subject CN & Distinct CA Families & Live Certs & CA Families Seen \\",
                 r"\midrule",
             ]
         )
@@ -1584,14 +1623,14 @@ def render_latex(
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
-        lines.append(r"No current CA-lineage drift was found.")
-    lines.append(r"\subsection{Past CA-Lineage Drift Now Fixed}")
+        lines.append(r"No current CA-family drift was found.")
+    lines.append(r"\subsection{Past CA-Family Drift Now Fixed}")
     if assessment.vendor_past_rows:
         lines.extend(
             [
                 r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedright\arraybackslash}p{0.40\linewidth}}",
                 r"\toprule",
-                r"Subject CN & Distinct Lineages & Historic Certs & Lineages Seen \\",
+                r"Subject CN & Distinct CA Families & Historic Certs & CA Families Seen \\",
                 r"\midrule",
             ]
         )
@@ -1601,7 +1640,7 @@ def render_latex(
             )
         lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
-        lines.append(r"No past-only CA-lineage drift was found.")
+        lines.append(r"No past-only CA-family drift was found.")
     lines.append(r"\subsection{Current SAN Drift}")
     if assessment.san_current_rows:
         lines.extend(
