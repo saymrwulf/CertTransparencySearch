@@ -237,6 +237,42 @@ def example_pattern_label(title: str) -> str:
     }.get(title, "Naming pattern")
 
 
+def delivery_pattern_meaning(label: str) -> str:
+    return {
+        "Adobe Campaign -> AWS ALB": "The public name first aliases into Adobe Campaign naming and then lands on Amazon load-balancing infrastructure. In plain terms, a messaging or campaign front appears to sit in front of AWS-hosted delivery.",
+        "Adobe Campaign -> AWS CloudFront": "The public name first aliases into Adobe Campaign naming and then into Amazon CloudFront. That usually means campaign or messaging traffic delivered through a CDN edge.",
+        "Adobe Campaign direct IP": "Adobe Campaign naming is visible in the DNS trail, but the public name lands straight on an address rather than on an obvious CDN or load balancer hostname.",
+        "AWS CloudFront": "The public name lands on Amazon's CDN edge without an Adobe layer. This usually means edge delivery for web or API traffic.",
+        "Google Apigee": "The public name lands on a managed API front door. That normally means the endpoint is being exposed as a governed API rather than directly from an application host.",
+        "Pega Cloud -> AWS ALB": "The public name points to Pega-managed application hosting that ultimately lands on AWS load-balancing infrastructure.",
+        "Direct AWS": "The public name lands directly on AWS-hosted infrastructure without a visible intermediary platform in public DNS.",
+        "Direct Microsoft edge": "The public name lands on Microsoft's front-door edge addresses rather than directly on a private application host.",
+        "CNAME to address (provider unclear)": "The public name aliases to another hostname and then to an address, but the public clues are too weak to assign a platform vendor confidently.",
+        "Direct address (provider unclear)": "The public name resolves straight to an address, with no strong provider clue visible in public DNS.",
+        "No public DNS (NXDOMAIN)": "The name contained in certificates does not currently exist in public DNS.",
+        "No public address data": "The name exists in DNS, but no public A or AAAA address was returned during the scan.",
+        "Dangling agency alias": "The name aliases to a third-party intermediary hostname that no longer resolves cleanly. That usually indicates stale or partially removed DNS.",
+    }.get(label, "Recurring public DNS landing pattern derived from the observed answer chain.")
+
+
+def delivery_pattern_rule(label: str) -> str:
+    return {
+        "Adobe Campaign -> AWS ALB": "Used when the alias chain contains Adobe Campaign naming and the terminal DNS clues point to AWS load-balancer or AWS-hosted infrastructure.",
+        "Adobe Campaign -> AWS CloudFront": "Used when the alias chain contains Adobe Campaign naming and the terminal target contains CloudFront clues.",
+        "Adobe Campaign direct IP": "Used when Adobe Campaign naming is visible but the name lands directly on an IP address.",
+        "AWS CloudFront": "Used when the terminal DNS target contains CloudFront clues without an Adobe Campaign layer in front of it.",
+        "Google Apigee": "Used when the alias chain or terminal target contains Apigee or Google API gateway clues such as apigee.net.",
+        "Pega Cloud -> AWS ALB": "Used when the DNS trail contains Pega-hosting clues and then AWS load-balancer clues.",
+        "Direct AWS": "Used when the name lands directly on AWS clues without an intermediate branded platform layer.",
+        "Direct Microsoft edge": "Used when the address falls in the public Microsoft front-door ranges used in this heuristic.",
+        "CNAME to address (provider unclear)": "Used when a CNAME chain exists, but no recognized provider clue appears in the public DNS trail.",
+        "Direct address (provider unclear)": "Used when the name resolves directly to an address and no recognized provider clue appears.",
+        "No public DNS (NXDOMAIN)": "Used when the DNS lookup returns NXDOMAIN.",
+        "No public address data": "Used when DNS exists but returns no public address data.",
+        "Dangling agency alias": "Used when the alias chain points to the agency-style intermediary namespace but does not resolve to a live endpoint.",
+    }.get(label, "Derived from the public DNS answer shape and the provider clues seen in names, targets, and PTRs.")
+
+
 def render_markdown(
     args: argparse.Namespace,
     report: dict[str, object],
@@ -317,6 +353,17 @@ def render_markdown(
     dns_stack_rows = [
         [label, str(count)]
         for label, count in report["dns_stack_counts"].most_common(12)
+    ]
+    dns_class_counts = report["dns_class_counts"]
+    alias_to_address_count = dns_class_counts.get("cname_to_address", 0)
+    direct_address_count = dns_class_counts.get("direct_address", 0)
+    nxdomain_count = dns_class_counts.get("nxdomain", 0)
+    dangling_count = dns_class_counts.get("dangling_cname", 0)
+    no_data_count = dns_class_counts.get("no_data", 0)
+    top_dns_patterns = report["dns_stack_counts"].most_common(8)
+    dns_pattern_rows = [
+        [label, str(count), delivery_pattern_meaning(label)]
+        for label, count in top_dns_patterns
     ]
     lines: list[str] = []
     lines.append("# CT and DNS Monograph")
@@ -578,6 +625,18 @@ def render_markdown(
     lines.append("")
     lines.append("What looks arbitrary at first glance is usually the result of different naming pressures colliding. Customer-facing naming wants short memorable brands. Platform naming wants stable operational rails. Delivery naming wants environment labels, release slots, or fleet indices. Migration naming preserves old labels because changing a working name can be risky and expensive.")
     lines.append("")
+    lines.append("### How To Read The Names")
+    lines.append("")
+    lines.extend(
+        [
+            "- In most of these names, the left-most label tells you the endpoint role, node slot, or environment slice, while the zone on the right tells you which public namespace the service is answering under.",
+            "- Standard delivery shorthand appears throughout the corpus: `dev`, `qa`, `uat`, `sit`, `stg`, `preprod`, and `prod` are ordinary environment markers rather than mysterious product names.",
+            "- `www` usually means a public web presentation rule, not a platform rail.",
+            "- In this corpus, `nwg` reads as NatWest Group shorthand. Names like `rbs`, `natwest`, `ulsterbank`, `lombard`, `natwestpayments`, `coutts`, and `nwgwealth` are best read as parallel business or service namespaces within a wider shared estate, not as random unrelated domains.",
+            "- Some short forms remain inferential rather than provable. For example, `nft` clearly behaves like a non-production stage label, but Certificate Transparency alone cannot prove the local expansion used inside the company.",
+        ]
+    )
+    lines.append("")
     lines.append("### Key Pattern Examples")
     lines.append("")
     lines.append("These four boxes are not four isolated hostnames. Each one uses a concrete Subject CN as the evidence anchor for a broader naming methodology that appears elsewhere in the estate as well.")
@@ -591,31 +650,54 @@ def render_markdown(
         for point in example.evidence:
             lines.append(f"- Evidence: {point}")
         lines.append("")
+    lines.append("### Why These Four Examples")
+    lines.append("")
+    lines.append("Taken together, these four examples explain most of the naming behaviour in the corpus. The first shows platform fleet naming, the second shows environment-and-release naming, the third shows customer-facing brand presentation, and the fourth shows shared-service or migration bridging across several business namespaces.")
+    lines.append("")
     lines.append("## Chapter 6: DNS Delivery Architecture")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
     lines.extend(
         [
-            f"- DNS classes: {', '.join(f'{label}={count}' for label, count in report['dns_class_counts'].most_common())}.",
-            f"- Top stack signatures: {', '.join(f'{label} ({count})' for label, count in report['dns_stack_counts'].most_common(8))}.",
-            f"- Provider hints observed: {', '.join(f'{label} ({count})' for label, count in report['provider_hint_counts'].most_common(8))}.",
+            f"- Most names resolve by first aliasing to another hostname and then to an address: {alias_to_address_count} alias-chain landings versus {direct_address_count} direct-address landings.",
+            f"- The dominant observed landing patterns are Adobe Campaign -> AWS ALB ({report['dns_stack_counts'].get('Adobe Campaign -> AWS ALB', 0)}), Adobe Campaign -> AWS CloudFront ({report['dns_stack_counts'].get('Adobe Campaign -> AWS CloudFront', 0)}), and AWS CloudFront without an Adobe layer ({report['dns_stack_counts'].get('AWS CloudFront', 0)}).",
+            f"- Smaller but important subsets look like governed API fronts or specialist application platforms: Google Apigee ({report['dns_stack_counts'].get('Google Apigee', 0)}) and Pega Cloud -> AWS ALB ({report['dns_stack_counts'].get('Pega Cloud -> AWS ALB', 0)}).",
+            f"- Not every certificate name still resolves publicly today: NXDOMAIN={nxdomain_count}, dangling alias={dangling_count}, no public address data={no_data_count}.",
         ]
     )
     lines.append("")
     lines.append("DNS is the public routing layer. It does not tell you everything about an application, but it does tell you where a public name lands: directly on an IP, through an alias chain, through a CDN, through an API gateway, or onto a specialist platform.")
     lines.append("")
-    lines.append("### Delivery Stack Counts")
+    lines.append("This chapter does not claim to know the full private architecture behind each service. It only claims what the public DNS trail supports. For each DNS SAN name in the certificate corpus, the scanner queried public `CNAME`, `A`, `AAAA`, and `PTR` data. It then reduced the observed answer trail into a short label. Those labels are not arbitrary brand names invented by the report; they are compact descriptions of what the public DNS evidence most strongly suggests.")
     lines.append("")
-    lines.extend(md_table(["Stack Signature", "Count"], dns_stack_rows))
+    lines.append("### How The DNS Evidence Is Read")
     lines.append("")
-    lines.append("### Plain-Language Platform Glossary")
+    lines.extend(
+        [
+            "- A `CNAME` shows that one public name is really an alias for another public name.",
+            "- The terminal hostname, returned addresses, and reverse-DNS names often reveal platform clues such as `cloudfront.net`, `elb.amazonaws.com`, `apigee.net`, or `campaign.adobe.com`.",
+            "- The report combines the answer shape and those clues into one short description. For example, `Adobe Campaign -> AWS ALB` means the alias chain contains Adobe Campaign naming and the terminal clues point to AWS load-balancing infrastructure.",
+            "- These labels are therefore evidence summaries, not claims of legal ownership or full internal design.",
+        ]
+    )
+    lines.append("")
+    lines.append("### Observed Public DNS Landing Patterns")
+    lines.append("")
+    lines.extend(md_table(["Observed Pattern", "Count", "Plain-Language Meaning"], dns_pattern_rows))
+    lines.append("")
+    lines.append("### How The Main Labels Were Assigned")
+    lines.append("")
+    for label, _count in top_dns_patterns[:6]:
+        lines.append(f"- **{label}**: {delivery_pattern_rule(label)}")
+    lines.append("")
+    lines.append("### Platform And DNS Glossary")
     lines.append("")
     glossary = ct_dns_utils.provider_explanations()
     for term in ["Adobe Campaign", "AWS", "AWS ALB", "AWS CloudFront", "Google Apigee", "Pega Cloud", "Microsoft Edge", "Infinite / agency alias", "CNAME", "A record", "AAAA record", "PTR record", "NXDOMAIN"]:
         lines.append(f"- **{term}**: {glossary[term]}")
     lines.append("")
-    lines.append("The important thing is not the vendor name by itself. The important thing is what role it implies. CloudFront implies a distribution edge. Apigee implies managed API exposure. Adobe Campaign implies a marketing or communications front. A load balancer implies traffic distribution to backend services.")
+    lines.append("The glossary terms above are the building blocks used in the landing-pattern table. The important thing is not the vendor name by itself. The important thing is the role implied by the DNS path: CloudFront suggests a distribution edge, Apigee suggests managed API exposure, Adobe Campaign suggests a marketing or communications front, and a load balancer suggests traffic distribution to backend services.")
     lines.append("")
     lines.append("## Chapter 7: Making The Whole Estate Make Sense")
     lines.append("")
@@ -938,6 +1020,13 @@ def render_latex(
         ]
     ]
     visible_purpose_rows = [(label, count, share, meaning) for label, count, share, meaning in purpose_rows if count != "0"]
+    dns_class_counts = report["dns_class_counts"]
+    alias_to_address_count = dns_class_counts.get("cname_to_address", 0)
+    direct_address_count = dns_class_counts.get("direct_address", 0)
+    nxdomain_count = dns_class_counts.get("nxdomain", 0)
+    dangling_count = dns_class_counts.get("dangling_cname", 0)
+    no_data_count = dns_class_counts.get("no_data", 0)
+    top_dns_patterns = report["dns_stack_counts"].most_common(8)
     appendix_pdf_path = args.appendix_pdf_output.resolve().as_posix()
     lines: list[str] = [
         r"\documentclass[11pt]{article}",
@@ -1238,6 +1327,19 @@ def render_latex(
     lines.append(
         r"The naming regime becomes intelligible when read as several superimposed languages: brand language, service language, environment language, platform language, and migration residue."
     )
+    lines.extend(
+        [
+            r"\subsection{How To Read The Names}",
+            r"\begin{itemize}[leftmargin=1.4em]",
+            r"\item In most of these names, the left-most label tells you the endpoint role, node slot, or environment slice, while the zone on the right tells you which public namespace the service is answering under.",
+            r"\item Standard delivery shorthand appears throughout the corpus: \texttt{dev}, \texttt{qa}, \texttt{uat}, \texttt{sit}, \texttt{stg}, \texttt{preprod}, and \texttt{prod} are ordinary environment markers rather than mysterious product names.",
+            r"\item \texttt{www} usually means a public web presentation rule, not a platform rail.",
+            r"\item In this corpus, \texttt{nwg} reads as NatWest Group shorthand. Names like \texttt{rbs}, \texttt{natwest}, \texttt{ulsterbank}, \texttt{lombard}, \texttt{natwestpayments}, \texttt{coutts}, and \texttt{nwgwealth} are best read as parallel business or service namespaces within a wider shared estate, not as random unrelated domains.",
+            r"\item Some short forms remain inferential rather than provable. For example, \texttt{nft} clearly behaves like a non-production stage label, but Certificate Transparency alone cannot prove the local expansion used inside the company.",
+            r"\end{itemize}",
+        ]
+    )
+    lines.append(r"\subsection{Key Pattern Examples}")
     lines.append(
         r"These four boxes are not four isolated hostnames. Each one uses a concrete Subject-CN value as the evidence anchor for a broader naming methodology that appears elsewhere in the estate as well."
     )
@@ -1251,30 +1353,56 @@ def render_latex(
         for point in example.evidence:
             lines.append(rf"\item {latex_escape(point)}")
         lines.append(r"\end{itemize}}")
+    lines.extend(
+        [
+            r"\subsection{Why These Four Examples}",
+            r"Taken together, these four examples explain most of the naming behaviour in the corpus. The first shows platform fleet naming, the second shows environment-and-release naming, the third shows customer-facing brand presentation, and the fourth shows shared-service or migration bridging across several business namespaces.",
+        ]
+    )
 
     lines.append(r"\section{DNS Delivery Architecture}")
     add_summary(
         [
-            f"DNS classes are {', '.join(f'{label}={count}' for label, count in report['dns_class_counts'].most_common())}.",
-            f"Top delivery signatures are {', '.join(f'{label} ({count})' for label, count in report['dns_stack_counts'].most_common(8))}.",
-            f"Provider hints observed are {', '.join(f'{label} ({count})' for label, count in report['provider_hint_counts'].most_common(8))}.",
+            f"Most names resolve by first aliasing to another hostname and then to an address: {alias_to_address_count} alias-chain landings versus {direct_address_count} direct-address landings.",
+            f"The dominant observed landing patterns are Adobe Campaign -> AWS ALB ({report['dns_stack_counts'].get('Adobe Campaign -> AWS ALB', 0)}), Adobe Campaign -> AWS CloudFront ({report['dns_stack_counts'].get('Adobe Campaign -> AWS CloudFront', 0)}), and AWS CloudFront without an Adobe layer ({report['dns_stack_counts'].get('AWS CloudFront', 0)}).",
+            f"Smaller but important subsets look like governed API fronts or specialist application platforms: Google Apigee ({report['dns_stack_counts'].get('Google Apigee', 0)}) and Pega Cloud -> AWS ALB ({report['dns_stack_counts'].get('Pega Cloud -> AWS ALB', 0)}).",
+            f"Not every certificate name still resolves publicly today: NXDOMAIN={nxdomain_count}, dangling alias={dangling_count}, no public address data={no_data_count}.",
         ]
+    )
+    lines.append(
+        r"This chapter does not claim to know the full private architecture behind each service. It only claims what the public DNS trail supports. For each DNS SAN name in the certificate corpus, the scanner queried public \texttt{CNAME}, \texttt{A}, \texttt{AAAA}, and \texttt{PTR} data. It then reduced the observed answer trail into a short label. Those labels are compact descriptions of the public DNS evidence, not arbitrary platform slogans."
     )
     lines.extend(
         [
-            r"\subsection{Delivery Stack Counts}",
-            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.74\linewidth} >{\raggedleft\arraybackslash}p{0.14\linewidth}}",
+            r"\subsection{How The DNS Evidence Is Read}",
+            r"\begin{itemize}[leftmargin=1.4em]",
+            r"\item A \texttt{CNAME} shows that one public name is really an alias for another public name.",
+            r"\item The terminal hostname, returned addresses, and reverse-DNS names often reveal platform clues such as \texttt{cloudfront.net}, \texttt{elb.amazonaws.com}, \texttt{apigee.net}, or \texttt{campaign.adobe.com}.",
+            r"\item The report combines the answer shape and those clues into one short description. For example, ``Adobe Campaign -> AWS ALB'' means the alias chain contains Adobe Campaign naming and the terminal clues point to AWS load-balancing infrastructure.",
+            r"\item These labels are therefore evidence summaries, not claims of legal ownership or full internal design.",
+            r"\end{itemize}",
+            r"\subsection{Observed Public DNS Landing Patterns}",
+            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.51\linewidth}}",
             r"\toprule",
-            r"Stack Signature & Count \\",
+            r"Observed Pattern & Count & Plain-Language Meaning \\",
             r"\midrule",
         ]
     )
-    for label, count in report["dns_stack_counts"].most_common(12):
-        lines.append(rf"{latex_escape(label)} & {count} \\")
+    for label, count in top_dns_patterns:
+        lines.append(rf"{latex_escape(label)} & {count} & {latex_escape(delivery_pattern_meaning(label))} \\")
     lines.extend([r"\bottomrule", r"\end{longtable}"])
     lines.extend(
         [
-            r"\subsection{Platform Glossary}",
+            r"\subsection{How The Main Labels Were Assigned}",
+            r"\begin{itemize}[leftmargin=1.4em]",
+        ]
+    )
+    for label, _count in top_dns_patterns[:6]:
+        lines.append(rf"\item \textbf{{{latex_escape(label)}}}: {latex_escape(delivery_pattern_rule(label))}")
+    lines.extend(
+        [
+            r"\end{itemize}",
+            r"\subsection{Platform And DNS Glossary}",
             r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedright\arraybackslash}p{0.70\linewidth}}",
             r"\toprule",
             r"Term & Explanation \\",
@@ -1285,6 +1413,9 @@ def render_latex(
     for term in ["Adobe Campaign", "AWS", "AWS ALB", "AWS CloudFront", "Google Apigee", "Pega Cloud", "Microsoft Edge", "Infinite / agency alias", "CNAME", "A record", "AAAA record", "PTR record", "NXDOMAIN"]:
         lines.append(rf"{latex_escape(term)} & {latex_escape(glossary[term])} \\")
     lines.extend([r"\bottomrule", r"\end{longtable}"])
+    lines.append(
+        r"The glossary terms above are the building blocks used in the landing-pattern table. The important thing is not the vendor name by itself. The important thing is the role implied by the DNS path: CloudFront suggests a distribution edge, Apigee suggests managed API exposure, Adobe Campaign suggests a marketing or communications front, and a load balancer suggests traffic distribution to backend services."
+    )
 
     lines.append(r"\section{Making The Whole Estate Make Sense}")
     add_summary(
