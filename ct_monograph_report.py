@@ -7,6 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 import ct_dns_utils
+import ct_focus_subjects
 import ct_lineage_report
 import ct_master_report
 import ct_scan
@@ -20,6 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cache-dir", type=Path, default=Path(".cache/ct-search"))
     parser.add_argument("--dns-cache-dir", type=Path, default=Path(".cache/dns-scan"))
     parser.add_argument("--history-cache-dir", type=Path, default=Path(".cache/ct-history-v2"))
+    parser.add_argument("--focus-subjects-file", type=Path, default=Path("focus_subjects.local.txt"))
     parser.add_argument("--cache-ttl-seconds", type=int, default=0)
     parser.add_argument("--dns-cache-ttl-seconds", type=int, default=86400)
     parser.add_argument("--max-candidates-per-domain", type=int, default=10000)
@@ -220,12 +222,99 @@ def driver_summary(subjects: str, issuers: str) -> str:
     return f"{truncate_text(first_list_item(subjects), 48)}; {truncate_text(first_list_item(issuers), 28)}"
 
 
+def counter_text(counter: Counter[str], limit: int = 4) -> str:
+    if not counter:
+        return "-"
+    items = [f"{name} ({count})" for name, count in counter.most_common(limit)]
+    if len(counter) > limit:
+        items.append(f"... (+{len(counter) - limit} more)")
+    return ", ".join(items)
+
+
 def overlap_signal(details: str) -> str:
     parts = []
     for piece in details.split("; "):
         if piece.startswith("DN=") or piece.startswith("SANs="):
             parts.append(piece)
     return truncate_text("; ".join(parts) if parts else details, 108)
+
+
+def focus_comparison_rows(focus_analysis: ct_focus_subjects.FocusCohortAnalysis) -> list[list[str]]:
+    return [
+        [
+            "Current direct Subject CN names",
+            str(focus_analysis.current_direct_subjects_count),
+            str(len(focus_analysis.rest_current_subject_dns_classes) and sum(focus_analysis.rest_current_subject_dns_classes.values()) or 0),
+            "Shows whether the cohort is mostly made of live direct front-door names or of carried SAN passengers.",
+        ],
+        [
+            "Current certificates",
+            str(focus_analysis.current_focus_certificate_count),
+            str(focus_analysis.current_rest_certificate_count),
+            "Shows the raw current certificate weight of the cohort against the rest of the estate.",
+        ],
+        [
+            "Issuer families in current certificates",
+            counter_text(focus_analysis.focus_current_issuer_families, 3),
+            counter_text(focus_analysis.rest_current_issuer_families, 3),
+            "Separates the older Sectigo/COMODO-style public web cohort from the Amazon-heavy operational rail population.",
+        ],
+        [
+            "Revoked share inside current certificates",
+            focus_analysis.focus_revoked_share,
+            focus_analysis.rest_revoked_share,
+            "A high revoked share points to rapid replacement churn or short-lived issuance iterations.",
+        ],
+        [
+            "Median SAN entries per current certificate",
+            str(focus_analysis.focus_median_san_entries),
+            str(focus_analysis.rest_median_san_entries),
+            "Small SAN sets usually indicate standalone front doors; large SAN sets usually indicate bundled platform coverage.",
+        ],
+        [
+            "Current multi-zone certificates",
+            str(focus_analysis.focus_multi_zone_certificate_count),
+            str(focus_analysis.rest_multi_zone_certificate_count),
+            "Multi-zone certificates are strong evidence of shared-service or bridge certificates rather than one-name service fronts.",
+        ],
+    ]
+
+
+def focus_notable_rows(focus_analysis: ct_focus_subjects.FocusCohortAnalysis) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for detail in focus_analysis.notables:
+        rows.append(
+            [
+                detail.subject_cn,
+                truncate_text(detail.analyst_theme, 28),
+                truncate_text(detail.observed_role, 32),
+                truncate_text(detail.basket_status, 28),
+                truncate_text(
+                    f"current={detail.current_direct_certificates}, carried={detail.current_non_focus_san_carriers}/{detail.historical_non_focus_san_carriers}, DNS={detail.current_dns_outcome}",
+                    64,
+                ),
+            ]
+        )
+    return rows
+
+
+def focus_appendix_rows(focus_analysis: ct_focus_subjects.FocusCohortAnalysis) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for detail in focus_analysis.details:
+        rows.append(
+            [
+                detail.subject_cn,
+                truncate_text(detail.analyst_note, 28),
+                truncate_text(detail.observed_role, 28),
+                f"{detail.current_direct_certificates}/{detail.historical_direct_certificates}",
+                f"{detail.current_non_focus_san_carriers}/{detail.historical_non_focus_san_carriers}",
+                truncate_text(detail.current_dns_outcome, 24),
+                f"revoked={detail.current_revoked_certificates}, live={detail.current_not_revoked_certificates}",
+                truncate_text(detail.current_red_flags, 24),
+                truncate_text(detail.past_red_flags, 24),
+            ]
+        )
+    return rows
 
 
 def example_pattern_label(title: str) -> str:
@@ -277,6 +366,7 @@ def render_markdown(
     args: argparse.Namespace,
     report: dict[str, object],
     assessment: ct_lineage_report.HistoricalAssessment,
+    focus_analysis: ct_focus_subjects.FocusCohortAnalysis | None,
 ) -> None:
     args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
     appendix_markdown = args.appendix_markdown_output.read_text(encoding="utf-8")
@@ -365,6 +455,13 @@ def render_markdown(
         [label, str(count), delivery_pattern_meaning(label)]
         for label, count in top_dns_patterns
     ]
+    focus_comparison = focus_comparison_rows(focus_analysis) if focus_analysis else []
+    focus_notables = focus_notable_rows(focus_analysis) if focus_analysis else []
+    focus_appendix = focus_appendix_rows(focus_analysis) if focus_analysis else []
+    has_focus = focus_analysis is not None
+    synthesis_chapter = 8 if has_focus else 7
+    limits_chapter = 9 if has_focus else 8
+    detailed_inventory_appendix = "D" if has_focus else "C"
     lines: list[str] = []
     lines.append("# CT and DNS Monograph")
     lines.append("")
@@ -392,7 +489,12 @@ def render_markdown(
             "- Read Chapters 2 and 3 if you want the current certificate-side story: issuers, trust, and purpose.",
             "- Read Chapter 4 if you want the historical lifecycle view and the red flags split into current versus fixed-in-the-past.",
             "- Read Chapters 5 and 6 if you want the naming and DNS story.",
-            "- Read Chapter 7 if you want the synthesis that ties business naming, service architecture, and hosting patterns together.",
+            *(
+                ["- Read Chapter 7 if you want the focused Subject-CN cohort analysis and why that subset behaves differently from the wider estate."]
+                if has_focus
+                else []
+            ),
+            f"- Read Chapter {synthesis_chapter} if you want the synthesis that ties business naming, service architecture, and hosting patterns together.",
             "- Use the appendices when you need the fine-grained evidence rather than the argument.",
         ]
     )
@@ -703,7 +805,72 @@ def render_markdown(
     lines.append("")
     lines.append("The glossary terms above are the building blocks used in the DNS-outcome table. This is also why the management summary mentions Adobe Campaign, CloudFront, Apigee, and Pega at all: not because brand names are the point, but because those names reveal what kind of public delivery role a hostname is landing on. CloudFront suggests a distribution edge, Apigee suggests managed API exposure, Adobe Campaign suggests a marketing or communications front, and a load balancer suggests traffic distribution to backend services.")
     lines.append("")
-    lines.append("## Chapter 7: Making The Whole Estate Make Sense")
+    if focus_analysis:
+        lines.append("## Chapter 7: Focused Subject-CN Cohort")
+        lines.append("")
+        lines.append("**Management Summary**")
+        lines.append("")
+        lines.extend(
+            [
+                f"- The focused cohort contains {focus_analysis.provided_subjects_count} analyst-selected Subject CN values. {focus_analysis.historically_seen_subjects_count} are visible somewhere in the historical CT corpus, and {focus_analysis.current_direct_subjects_count} still have direct current certificates.",
+                f"- The current focused cohort is structurally different from the rest of the estate: all {focus_analysis.current_focus_certificate_count} current focused certificates are Sectigo/COMODO-lineage, compared with {counter_text(focus_analysis.rest_current_issuer_families, 3)} in the rest of the corpus.",
+                f"- The focused cohort uses much smaller certificates: median SAN size {focus_analysis.focus_median_san_entries} versus {focus_analysis.rest_median_san_entries}, and {focus_analysis.focus_multi_zone_certificate_count} current multi-zone certificates versus {focus_analysis.rest_multi_zone_certificate_count} outside the cohort.",
+                f"- Revocation churn is much higher inside the focused cohort: {focus_analysis.focus_revoked_current_count} revoked versus {focus_analysis.focus_not_revoked_current_count} not revoked ({focus_analysis.focus_revoked_share}), compared with {focus_analysis.rest_revoked_current_count} versus {focus_analysis.rest_not_revoked_current_count} ({focus_analysis.rest_revoked_share}) outside the cohort.",
+                f"- Cross-basket carrying is limited rather than universal. The count of focused entries that appear today only as SAN passengers is {focus_analysis.current_carried_only_subjects_count}, and the count ever seen as SAN passengers inside non-focused certificates at all is {focus_analysis.historical_non_focus_carried_subjects_count}.",
+            ]
+        )
+        lines.append("")
+        lines.append("This chapter treats the supplied Subject-CN list as an analyst-guided cohort rather than as a neutral statistical sample. The question is not whether these names are the most common names in the estate. The question is why they were memorable enough to be singled out, and whether the certificate and DNS evidence shows that they belong to a different naming and hosting tradition.")
+        lines.append("")
+        lines.append("The short answer is yes. Most of this cohort behaves like an older branded or service-front certificate tradition: direct names under the branded public zones configured for the scan, small SAN sets, one-zone certificates, strong Sectigo/COMODO continuity, and direct or simple public DNS landings. That is a very different shape from the bulk operational estate dominated by Amazon-issued, multi-zone, multi-SAN, platform-style certificates.")
+        lines.append("")
+        lines.append("### Focused Cohort Versus The Rest Of The Estate")
+        lines.append("")
+        lines.extend(md_table(["Comparison View", "Focused Cohort", "Rest Of Current Corpus", "Why It Matters"], focus_comparison))
+        lines.append("")
+        lines.append("### Why This Cohort Feels Different")
+        lines.append("")
+        lines.extend(
+            [
+                "- Most names in the cohort are human-readable brand, service, identity, or vendor labels directly under the branded public zones configured for the scan, not rail-style numbered fleet names.",
+                "- The cohort barely participates in the multi-zone bridge certificates that dominate the wider estate. That usually means these names are closer to a public service front door than to a shared operational rail.",
+                "- The public DNS evidence for the current focused Subject CN names is also different. The cohort lands much more often on direct addresses or simple direct AWS clues, while the wider current Subject-CN population is much more dominated by Adobe-managed, Apigee-managed, or NXDOMAIN outcomes.",
+                "- Historical red flags are common in the cohort, but they are mostly past rather than current. That is consistent with a legacy or manually managed public web estate that has been cleaned up over time rather than with a currently chaotic platform core.",
+            ]
+        )
+        lines.append("")
+        lines.append("One subtle point matters here. The cohort is not one perfectly uniform thing. Most entries are branded or service-front names, but a few are clearly platform anchors with large environment-style SAN matrices. Those outliers do not break the thesis; they show that the memorable names were selected from both sides of the estate: public fronts and key platform control points.")
+        lines.append("")
+        lines.append("### Cross-Basket Carrying And Migration")
+        lines.append("")
+        if focus_analysis.transition_rows:
+            lines.extend(
+                md_table(
+                    ["Subject CN", "Current Basket Status", "Direct/Carried", "Max Direct-To-Carrier Overlap", "Carrier Subjects"],
+                    [
+                        [
+                            detail.subject_cn,
+                            detail.basket_status,
+                            f"{detail.current_direct_certificates}/{detail.current_non_focus_san_carriers + detail.historical_non_focus_san_carriers}",
+                            str(detail.max_direct_to_carrier_overlap_days),
+                            truncate_text(detail.carrier_subjects, 48),
+                        ]
+                        for detail in focus_analysis.transition_rows[:10]
+                    ],
+                )
+            )
+        else:
+            lines.append("No focused names were seen as SAN passengers inside non-focused certificates.")
+        lines.append("")
+        lines.append("This migration table is important because it answers a narrower question than the rest of the chapter. It asks whether these names were gradually absorbed into broader certificates from outside the cohort. The answer is: only in a small number of cases. The clearest current example is an apex-and-`www` migration, where the `www` name is now carried by the apex certificate family rather than by its own direct current certificate. Historical carrying exists for a small number of messaging-style and campaign-style names as well, but this is not the dominant story for the cohort as a whole.")
+        lines.append("")
+        lines.append("### Notable Focused Names")
+        lines.append("")
+        lines.extend(md_table(["Subject CN", "Analyst Theme", "Observed Role", "Basket Status", "Why It Stands Out"], focus_notables))
+        lines.append("")
+        lines.append("Two patterns deserve special interpretation. One is the churn cluster pattern: many current certificates for the same remembered name, but almost all revoked, which points to rapid replacement rather than to long-lived concurrent service certificates. The other is the apex-and-`www` migration pattern: historically direct, now carried by the apex certificate set. Those two extremes help explain why the cohort feels familiar to a human observer. It contains memorable public entry points and the awkward historical residue around them, not the bulk hidden machinery of the estate.")
+        lines.append("")
+    lines.append(f"## Chapter {synthesis_chapter}: Making The Whole Estate Make Sense")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
@@ -720,7 +887,7 @@ def render_markdown(
     lines.append("")
     lines.append("This is why the estate can look both tidy and messy at once. It is tidy within each layer, but messy across layers because the layers are solving different problems.")
     lines.append("")
-    lines.append("## Chapter 8: Limits, Confidence, and Noise")
+    lines.append(f"## Chapter {limits_chapter}: Limits, Confidence, and Noise")
     lines.append("")
     lines.append("**Management Summary**")
     lines.append("")
@@ -978,7 +1145,29 @@ def render_markdown(
     else:
         lines.append("No step weeks met the threshold.")
     lines.append("")
-    lines.append("## Appendix C: Detailed Inventory Appendix")
+    if focus_analysis:
+        lines.append("## Appendix C: Focused Subject-CN Detail")
+        lines.append("")
+        lines.append("This appendix keeps the complete focused-cohort table inside the monograph. It is where the analyst notes, the observed technical role, the cross-basket carrying signal, and the red-flag state are shown side by side.")
+        lines.append("")
+        lines.extend(
+            md_table(
+                [
+                    "Subject CN",
+                    "Analyst Note",
+                    "Observed Role",
+                    "Current/Historical Direct",
+                    "Current/Historical Carried",
+                    "Current DNS Outcome",
+                    "Current Revocation Mix",
+                    "Current Flags",
+                    "Past Flags",
+                ],
+                focus_appendix,
+            )
+        )
+        lines.append("")
+    lines.append(f"## Appendix {detailed_inventory_appendix}: Detailed Inventory Appendix")
     lines.append("")
     lines.append("The full issuer-first family inventory is reproduced below so that the monograph remains complete rather than merely interpretive.")
     lines.append("")
@@ -990,6 +1179,7 @@ def render_latex(
     args: argparse.Namespace,
     report: dict[str, object],
     assessment: ct_lineage_report.HistoricalAssessment,
+    focus_analysis: ct_focus_subjects.FocusCohortAnalysis | None,
 ) -> None:
     args.latex_output.parent.mkdir(parents=True, exist_ok=True)
     hits = report["hits"]
@@ -1033,6 +1223,10 @@ def render_latex(
     dangling_count = dns_class_counts.get("dangling_cname", 0)
     no_data_count = dns_class_counts.get("no_data", 0)
     top_dns_patterns = report["dns_stack_counts"].most_common(8)
+    focus_comparison = focus_comparison_rows(focus_analysis) if focus_analysis else []
+    focus_notables = focus_notable_rows(focus_analysis) if focus_analysis else []
+    focus_appendix = focus_appendix_rows(focus_analysis) if focus_analysis else []
+    has_focus = focus_analysis is not None
     appendix_pdf_path = args.appendix_pdf_output.resolve().as_posix()
     lines: list[str] = [
         r"\documentclass[11pt]{article}",
@@ -1129,7 +1323,12 @@ def render_latex(
             "Chapters 2 and 3 explain what the current certificates are and what they are for.",
             "Chapter 4 explains the historical lifecycle and splits red flags into current versus fixed-in-the-past.",
             "Chapters 5 and 6 explain naming and DNS delivery.",
-            "Chapter 7 ties the whole estate back to operational reality.",
+            *(
+                ["Chapter 7 explains the focused Subject-CN cohort and why it behaves differently from the wider estate."]
+                if has_focus
+                else []
+            ),
+            "The next synthesis chapter ties the whole estate back to operational reality.",
             "The appendices contain the detailed catalogue, the historical red-flag detail, and the full inventory.",
         ]
     )
@@ -1455,6 +1654,90 @@ def render_latex(
         r"The glossary terms above are the building blocks used in the DNS-outcome table. This is also why the management summary mentions Adobe Campaign, CloudFront, Apigee, and Pega at all: not because brand names are the point, but because those names reveal what kind of public delivery role a hostname is landing on. CloudFront suggests a distribution edge, Apigee suggests managed API exposure, Adobe Campaign suggests a marketing or communications front, and a load balancer suggests traffic distribution to backend services."
     )
 
+    if focus_analysis:
+        lines.append(r"\section{Focused Subject-CN Cohort}")
+        add_summary(
+            [
+                f"The focused cohort contains {focus_analysis.provided_subjects_count} analyst-selected Subject CN values. {focus_analysis.historically_seen_subjects_count} are visible somewhere in the historical CT corpus, and {focus_analysis.current_direct_subjects_count} still have direct current certificates.",
+                f"The current focused cohort is structurally different from the rest of the estate: all {focus_analysis.current_focus_certificate_count} current focused certificates are Sectigo/COMODO-lineage, compared with {counter_text(focus_analysis.rest_current_issuer_families, 3)} in the rest of the corpus.",
+                f"The focused cohort uses much smaller certificates: median SAN size {focus_analysis.focus_median_san_entries} versus {focus_analysis.rest_median_san_entries}, and {focus_analysis.focus_multi_zone_certificate_count} current multi-zone certificates versus {focus_analysis.rest_multi_zone_certificate_count} outside the cohort.",
+                f"Revocation churn is much higher inside the focused cohort: {focus_analysis.focus_revoked_current_count} revoked versus {focus_analysis.focus_not_revoked_current_count} not revoked ({focus_analysis.focus_revoked_share}), compared with {focus_analysis.rest_revoked_current_count} versus {focus_analysis.rest_not_revoked_current_count} ({focus_analysis.rest_revoked_share}) outside the cohort.",
+                f"Cross-basket carrying is limited rather than universal. The count of focused entries that appear today only as SAN passengers is {focus_analysis.current_carried_only_subjects_count}, and the count ever seen as SAN passengers inside non-focused certificates at all is {focus_analysis.historical_non_focus_carried_subjects_count}.",
+            ]
+        )
+        lines.append(
+            r"This chapter treats the supplied Subject-CN list as an analyst-guided cohort rather than as a neutral statistical sample. The question is not whether these names are the most common names in the estate. The question is why they were memorable enough to be singled out, and whether the certificate and DNS evidence shows that they belong to a different naming and hosting tradition."
+        )
+        lines.append(
+            r"The short answer is yes. Most of this cohort behaves like an older branded or service-front certificate tradition: direct names under the branded public zones configured for the scan, small SAN sets, one-zone certificates, strong Sectigo/COMODO continuity, and direct or simple public DNS landings. That is a very different shape from the bulk operational estate dominated by Amazon-issued, multi-zone, multi-SAN, platform-style certificates."
+        )
+        lines.extend(
+            [
+                r"\subsection{Focused Cohort Versus The Rest Of The Estate}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.28\linewidth}}",
+                r"\toprule",
+                r"Comparison View & Focused Cohort & Rest Of Current Corpus & Why It Matters \\",
+                r"\midrule",
+            ]
+        )
+        for left, focus_value, rest_value, why in focus_comparison:
+            lines.append(
+                rf"{latex_escape(left)} & {latex_escape(focus_value)} & {latex_escape(rest_value)} & {latex_escape(why)} \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+        lines.extend(
+            [
+                r"\subsection{Why This Cohort Feels Different}",
+                r"\begin{itemize}[leftmargin=1.4em]",
+                r"\item Most names in the cohort are human-readable brand, service, identity, or vendor labels directly under the branded public zones configured for the scan, not rail-style numbered fleet names.",
+                r"\item The cohort barely participates in the multi-zone bridge certificates that dominate the wider estate. That usually means these names are closer to a public service front door than to a shared operational rail.",
+                r"\item The public DNS evidence for the current focused Subject CN names is also different. The cohort lands much more often on direct addresses or simple direct AWS clues, while the wider current Subject-CN population is much more dominated by Adobe-managed, Apigee-managed, or NXDOMAIN outcomes.",
+                r"\item Historical red flags are common in the cohort, but they are mostly past rather than current. That is consistent with a legacy or manually managed public web estate that has been cleaned up over time rather than with a currently chaotic platform core.",
+                r"\end{itemize}",
+            ]
+        )
+        lines.append(
+            r"One subtle point matters here. The cohort is not one perfectly uniform thing. Most entries are branded or service-front names, but a few are clearly platform anchors with large environment-style SAN matrices. Those outliers do not break the thesis; they show that the memorable names were selected from both sides of the estate: public fronts and key platform control points."
+        )
+        lines.append(r"\subsection{Cross-Basket Carrying And Migration}")
+        if focus_analysis.transition_rows:
+            lines.extend(
+                [
+                    r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.23\linewidth} >{\raggedright\arraybackslash}p{0.21\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth}}",
+                    r"\toprule",
+                    r"Subject CN & Current Basket Status & Direct / Carried & Max Overlap Days & Carrier Subjects \\",
+                    r"\midrule",
+                ]
+            )
+            for detail in focus_analysis.transition_rows[:10]:
+                carried_total = detail.current_non_focus_san_carriers + detail.historical_non_focus_san_carriers
+                lines.append(
+                    rf"{latex_escape(detail.subject_cn)} & {latex_escape(detail.basket_status)} & {detail.current_direct_certificates}/{carried_total} & {detail.max_direct_to_carrier_overlap_days} & {latex_escape(truncate_text(detail.carrier_subjects, 48))} \\"
+                )
+            lines.extend([r"\bottomrule", r"\end{longtable}"])
+        else:
+            lines.append(r"No focused names were seen as SAN passengers inside non-focused certificates.")
+        lines.append(
+            r"This migration table answers a narrower question than the rest of the chapter. It asks whether these names were gradually absorbed into broader certificates from outside the cohort. The answer is: only in a small number of cases. The clearest current example is an apex-and-\texttt{www} migration, where the \texttt{www} name is now carried by the apex certificate family rather than by its own direct current certificate. Historical carrying exists for a small number of messaging-style and campaign-style names as well, but this is not the dominant story for the cohort as a whole."
+        )
+        lines.extend(
+            [
+                r"\subsection{Notable Focused Names}",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedright\arraybackslash}p{0.17\linewidth} >{\raggedright\arraybackslash}p{0.21\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.16\linewidth}}",
+                r"\toprule",
+                r"Subject CN & Analyst Theme & Observed Role & Basket Status & Why It Stands Out \\",
+                r"\midrule",
+            ]
+        )
+        for row in focus_notables:
+            lines.append(
+                rf"{latex_escape(row[0])} & {latex_escape(row[1])} & {latex_escape(row[2])} & {latex_escape(row[3])} & {latex_escape(row[4])} \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+        lines.append(
+            r"Two patterns deserve special interpretation. One is the churn cluster pattern: many current certificates for the same remembered name, but almost all revoked, which points to rapid replacement rather than to long-lived concurrent service certificates. The other is the apex-and-\texttt{www} migration pattern: historically direct, now carried by the apex certificate set. Those two extremes help explain why the cohort feels familiar to a human observer. It contains memorable public entry points and the awkward historical residue around them, not the bulk hidden machinery of the estate."
+        )
+
     lines.append(r"\section{Making The Whole Estate Make Sense}")
     add_summary(
         [
@@ -1707,6 +1990,23 @@ def render_latex(
     else:
         lines.append(r"No step weeks met the threshold.")
 
+    if focus_analysis:
+        lines.extend(
+            [
+                r"\section{Focused Subject-CN Detail}",
+                r"This appendix keeps the complete focused-cohort table inside the monograph. It is where the analyst notes, the observed technical role, the cross-basket carrying signal, and the red-flag state are shown side by side.",
+                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.17\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.15\linewidth} >{\raggedright\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.11\linewidth} >{\raggedright\arraybackslash}p{0.07\linewidth} >{\raggedright\arraybackslash}p{0.07\linewidth}}",
+                r"\toprule",
+                r"Subject CN & Analyst Note & Observed Role & Direct C/H & Carried C/H & Current DNS Outcome & Current Revocation Mix & Current Flags & Past Flags \\",
+                r"\midrule",
+            ]
+        )
+        for row in focus_appendix:
+            lines.append(
+                rf"{latex_escape(row[0])} & {latex_escape(row[1])} & {latex_escape(row[2])} & {latex_escape(row[3])} & {latex_escape(row[4])} & {latex_escape(row[5])} & {latex_escape(row[6])} & {latex_escape(row[7])} & {latex_escape(row[8])} \\"
+            )
+        lines.extend([r"\bottomrule", r"\end{longtable}"])
+
     lines.extend(
         [
             r"\section{Detailed Inventory Appendix}",
@@ -1722,9 +2022,17 @@ def main() -> int:
     args = parse_args()
     report = ct_master_report.summarize_for_report(args)
     assessment = ct_lineage_report.build_assessment(build_history_args(args))
+    focus_subjects = ct_focus_subjects.load_focus_subjects(args.focus_subjects_file)
+    focus_analysis = ct_focus_subjects.build_analysis(
+        focus_subjects,
+        report,
+        assessment,
+        args.dns_cache_dir,
+        args.dns_cache_ttl_seconds,
+    )
     render_appendix_inventory(args, report)
-    render_markdown(args, report, assessment)
-    render_latex(args, report, assessment)
+    render_markdown(args, report, assessment, focus_analysis)
+    render_latex(args, report, assessment, focus_analysis)
     if not args.skip_pdf:
         ct_scan.compile_latex_to_pdf(args.latex_output, args.pdf_output, args.pdf_engine)
     if not args.quiet:

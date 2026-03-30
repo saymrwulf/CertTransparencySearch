@@ -1,0 +1,5 @@
+# Example only. Keep real Subject CN cohorts in focus_subjects.local.txt, which is ignored by git.
+# Format: one Subject CN per line, optionally followed by analyst metadata in parentheses.
+service-one.example.invalid (customer-facing brand entry point)
+vendor-auth.example.invalid (vendor-integrated identity front)
+stage-app.example.invalid (environment or release marker)

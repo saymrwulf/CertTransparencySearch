@@ -6,11 +6,13 @@ This project builds a publication-grade monograph from Certificate Transparency 
 - it verifies locally that the certificates are real leaf certificates rather than CA certificates or precertificates
 - it assesses intended usage from EKU and KeyUsage
 - it scans the DNS names exposed by the SAN corpus
+- it can analyse a second local-only Subject-CN cohort file against the wider estate
 - it produces one primary readable output set: a monograph in Markdown, LaTeX, and PDF
 
 The project is designed for public source control:
 
 - real search terms live only in `domains.local.txt`
+- real focused Subject-CN cohorts live only in `focus_subjects.local.txt`
 - generated artefacts live only in `output/`
 - caches live only in `.cache/`
 
@@ -58,21 +60,26 @@ make init-config
 
 Then edit `domains.local.txt` and replace the placeholder values with the real search terms you want to scan.
 
+If you want the monograph to analyse a remembered or suspicious Subject-CN cohort as well, edit `focus_subjects.local.txt` too. The format is one Subject CN per line, optionally followed by analyst notes in parentheses.
+
 ## Local Search Terms
 
 The tracked file is:
 
 - `domains.example.txt`
+- `focus_subjects.example.txt`
 
 The local-only file is:
 
 - `domains.local.txt`
+- `focus_subjects.local.txt`
 
 Rules:
 
 - keep real search terms only in `domains.local.txt`
+- keep real focused Subject-CN cohorts only in `focus_subjects.local.txt`
 - do not rename that file unless you also pass `DOMAINS=...` to `make`
-- do not commit it
+- do not commit either local file
 
 ## One-Command Runs
 
@@ -152,6 +159,7 @@ make all
 The default `Makefile` values are:
 
 - `DOMAINS=domains.local.txt`
+- `FOCUS_SUBJECTS=focus_subjects.local.txt`
 - `CACHE_TTL=0`
 - `DNS_CACHE_TTL=86400`
 - `MAX_CANDIDATES=10000`
@@ -172,6 +180,12 @@ Or:
 
 ```bash
 make monograph DOMAINS=/path/to/other.local.txt
+```
+
+Or override both local inputs:
+
+```bash
+make monograph DOMAINS=/path/to/domains.local.txt FOCUS_SUBJECTS=/path/to/focus_subjects.local.txt
 ```
 
 ## Manual Commands
@@ -233,6 +247,7 @@ This is only needed if you want the raw family inventory outside the monograph:
 ```bash
 .venv/bin/python ct_monograph_report.py \
   --domains-file domains.local.txt \
+  --focus-subjects-file focus_subjects.local.txt \
   --cache-ttl-seconds 0 \
   --dns-cache-ttl-seconds 86400 \
   --max-candidates-per-domain 10000 \
@@ -258,6 +273,8 @@ The scanner checks the live raw identity-row count before it executes the capped
 ## Public Repo Rules
 
 - keep `domains.local.txt` local only
+- keep `focus_subjects.local.txt` local only
 - never commit `output/`
 - never commit `.cache/`
 - if you need a sample config in git, update `domains.example.txt`, not `domains.local.txt`
+- if you need a sample focused-cohort config in git, update `focus_subjects.example.txt`, not `focus_subjects.local.txt`

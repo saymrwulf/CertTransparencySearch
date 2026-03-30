@@ -1,6 +1,7 @@
 PYTHON := .venv/bin/python
 PIP := .venv/bin/pip
 DOMAINS ?= domains.local.txt
+FOCUS_SUBJECTS ?= focus_subjects.local.txt
 CACHE_TTL ?= 0
 DNS_CACHE_TTL ?= 86400
 MAX_CANDIDATES ?= 10000
@@ -15,6 +16,7 @@ install: bootstrap
 
 init-config:
 	test -f $(DOMAINS) || cp domains.example.txt $(DOMAINS)
+	test -f $(FOCUS_SUBJECTS) || cp focus_subjects.example.txt $(FOCUS_SUBJECTS)
 
 inventory:
 	$(PYTHON) ct_scan.py \
@@ -55,6 +57,7 @@ consolidated:
 monograph:
 	$(PYTHON) ct_monograph_report.py \
 		--domains-file $(DOMAINS) \
+		--focus-subjects-file $(FOCUS_SUBJECTS) \
 		--cache-ttl-seconds $(CACHE_TTL) \
 		--dns-cache-ttl-seconds $(DNS_CACHE_TTL) \
 		--max-candidates-per-domain $(MAX_CANDIDATES) \
