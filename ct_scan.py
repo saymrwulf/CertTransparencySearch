@@ -1007,6 +1007,7 @@ def render_latex_report(
     groups: list[CertificateGroup],
     stats: ScanStats,
     issuer_trust: dict[str, IssuerTrustInfo],
+    show_page_numbers: bool = True,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     issuer_hits, ordered_issuers = group_hits_by_issuer(hits)
@@ -1027,7 +1028,6 @@ def render_latex_report(
         r"\usepackage{tabularx}",
         r"\usepackage{longtable}",
         r"\usepackage{enumitem}",
-        r"\usepackage{fancyhdr}",
         r"\usepackage{titlesec}",
         r"\usepackage[most]{tcolorbox}",
         r"\usepackage{fancyvrb}",
@@ -1055,15 +1055,12 @@ def render_latex_report(
         r"\setlength{\parindent}{0pt}",
         r"\setlength{\parskip}{6pt}",
         r"\setlength{\emergencystretch}{3em}",
-        r"\setlength{\headheight}{16pt}",
+        r"\setlength{\footskip}{24pt}",
         r"\setlength{\tabcolsep}{4.2pt}",
         r"\renewcommand{\arraystretch}{1.12}",
         r"\raggedbottom",
         r"\setcounter{tocdepth}{2}",
-        r"\pagestyle{fancy}",
-        r"\fancyhf{}",
-        r"\renewcommand{\headrulewidth}{0pt}",
-        r"\fancyfoot[C]{\sffamily\footnotesize \thepage}",
+        rf"\pagestyle{{{'plain' if show_page_numbers else 'empty'}}}",
         r"\titleformat{\section}{\sffamily\bfseries\LARGE\color{Ink}\raggedright}{\thesection}{0.8em}{}",
         r"\titleformat{\subsection}{\sffamily\bfseries\Large\color{Ink}\raggedright}{\thesubsection}{0.8em}{}",
         r"\titleformat{\subsubsection}{\sffamily\bfseries\normalsize\color{Ink}\raggedright}{\thesubsubsection}{0.8em}{}",

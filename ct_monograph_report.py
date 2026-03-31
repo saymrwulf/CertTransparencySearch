@@ -72,6 +72,7 @@ def render_appendix_inventory(args: argparse.Namespace, report: dict[str, object
         report["groups"],
         stats,
         report["issuer_trust"],
+        show_page_numbers=False,
     )
     if not args.skip_pdf:
         ct_scan.compile_latex_to_pdf(args.appendix_latex_output, args.appendix_pdf_output, args.pdf_engine)
@@ -1698,7 +1699,6 @@ def render_latex(
         r"\usepackage{longtable}",
         r"\usepackage{needspace}",
         r"\usepackage{enumitem}",
-        r"\usepackage{fancyhdr}",
         r"\usepackage{titlesec}",
         r"\usepackage[most]{tcolorbox}",
         r"\usepackage{pdfpages}",
@@ -1715,15 +1715,12 @@ def render_latex(
         r"\setlength{\parindent}{0pt}",
         r"\setlength{\parskip}{6pt}",
         r"\setlength{\emergencystretch}{4em}",
-        r"\setlength{\headheight}{16pt}",
+        r"\setlength{\footskip}{24pt}",
         r"\setlength{\tabcolsep}{4.2pt}",
         r"\renewcommand{\arraystretch}{1.12}",
         r"\raggedbottom",
         r"\setcounter{tocdepth}{2}",
-        r"\pagestyle{fancy}",
-        r"\fancyhf{}",
-        r"\renewcommand{\headrulewidth}{0pt}",
-        r"\fancyfoot[C]{\sffamily\footnotesize \thepage}",
+        r"\pagestyle{plain}",
         r"\titleformat{\section}{\sffamily\bfseries\LARGE\color{Ink}\raggedright}{\thesection}{0.8em}{}",
         r"\titleformat{\subsection}{\sffamily\bfseries\Large\color{Ink}\raggedright}{\thesubsection}{0.8em}{}",
         r"\tcbset{panel/.style={enhanced,breakable,boxrule=0.55pt,arc=3pt,left=9pt,right=9pt,top=8pt,bottom=8pt,colback=white,colframe=Line}}",
