@@ -217,6 +217,63 @@ def compact_list_items(value: str, keep: int = 2, limit: int = 96) -> str:
     return truncate_text(", ".join(parts[:keep]) + f", ... (+{len(parts) - keep} more)", limit)
 
 
+def compact_family_basis(value: str) -> str:
+    prefixes = {
+        "CN pattern with running-number slot: ": "Numbered family: ",
+        "Same endpoint CN family (exact CN; www. grouped with base name): ": "Exact endpoint family: ",
+    }
+    for prefix, replacement in prefixes.items():
+        if value.startswith(prefix):
+            return value.replace(prefix, replacement, 1)
+    return truncate_text(value, 92)
+
+
+def latex_table_cell(value: str) -> str:
+    escaped = latex_escape(value)
+    for token in [".", "/", "-", ":", ";", ",", "="]:
+        escaped = escaped.replace(token, token + r"\allowbreak{}")
+    return escaped
+
+
+def append_longtable(
+    lines: list[str],
+    spec: str,
+    headers: list[str],
+    rows: list[list[str]],
+    *,
+    font: str = "small",
+    tabcolsep: str | None = "3.8pt",
+) -> None:
+    lines.append(r"\begingroup")
+    if font:
+        lines.append(rf"\{font}")
+    if tabcolsep:
+        lines.append(rf"\setlength{{\tabcolsep}}{{{tabcolsep}}}")
+    lines.append(rf"\begin{{longtable}}{{{spec}}}")
+    header_line = " & ".join(latex_escape(header) for header in headers) + r" \\"
+    lines.extend(
+        [
+            r"\toprule",
+            header_line,
+            r"\midrule",
+            r"\endfirsthead",
+            r"\toprule",
+            header_line,
+            r"\midrule",
+            r"\endhead",
+            r"\midrule",
+            rf"\multicolumn{{{len(headers)}}}{{r}}{{\footnotesize\itshape Continued on next page}} \\",
+            r"\midrule",
+            r"\endfoot",
+            r"\bottomrule",
+            r"\endlastfoot",
+        ]
+    )
+    for row in rows:
+        lines.append(" & ".join(latex_table_cell(cell) for cell in row) + r" \\")
+    lines.extend([r"\end{longtable}", r"\endgroup"])
+
+
 def nonzero_purpose_rows(purpose_rows: list[list[str]]) -> list[list[str]]:
     return [row for row in purpose_rows if row[1] != "0"]
 
@@ -337,7 +394,7 @@ def top_caa_overlap_rows(analysis: ct_caa_analysis.CaaAnalysis, limit: int = 15)
             row.name,
             row.zone,
             ", ".join(row.current_covering_families),
-            truncate_text(", ".join(row.current_covering_subject_cns), 72),
+            compact_list_items(", ".join(row.current_covering_subject_cns), keep=2, limit=64),
         ]
         for row in ordered[:limit]
     ]
@@ -631,10 +688,9 @@ def render_markdown(
     ]
     family_rows = [
         [
-            row["group_id"],
-            row["basis"],
-            row["certificates"],
-            row["subjects"],
+            compact_family_basis(row["basis"]),
+            str(row["certificates"]),
+            str(row["subjects"]),
             first_list_item(row["top_stacks"]),
         ]
         for row in report["group_digest"]
@@ -1245,7 +1301,7 @@ def render_markdown(
     lines.append("")
     lines.append("This appendix is a compact family map. It is not the place for full per-certificate evidence; that remains in the detailed inventory appendix at the end.")
     lines.append("")
-    lines.extend(md_table(["ID", "Basis", "Certs", "CNs", "Dominant Stack"], family_rows))
+    lines.extend(md_table(["Family Basis", "Certs", "CNs", "Dominant Stack"], family_rows))
     lines.append("")
     lines.append("## Appendix B: Historical Red-Flag Detail")
     lines.append("")
@@ -1573,6 +1629,15 @@ def render_latex(
     total_certificates = len(report["classifications"])
     issuer_trust = report["issuer_trust"]
     issuer_family_rows = build_issuer_family_rows(report)
+    family_rows = [
+        [
+            compact_family_basis(row["basis"]),
+            str(row["certificates"]),
+            str(row["subjects"]),
+            first_list_item(row["top_stacks"]),
+        ]
+        for row in report["group_digest"]
+    ]
     dual_items = [item for item in report["classifications"] if item.category == "tls_server_and_client"]
     dual_issuer_counts = Counter(short_issuer(item.issuer_name) for item in dual_items)
     server_only_count = purpose_summary.category_counts.get("tls_server_only", 0)
@@ -1631,6 +1696,7 @@ def render_latex(
         r"\usepackage{booktabs}",
         r"\usepackage{tabularx}",
         r"\usepackage{longtable}",
+        r"\usepackage{needspace}",
         r"\usepackage{enumitem}",
         r"\usepackage{fancyhdr}",
         r"\usepackage{titlesec}",
@@ -2151,17 +2217,14 @@ def render_latex(
         ]
     )
     if caa_analysis.multi_family_overlap_names:
-        lines.extend(
-            [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.29\linewidth} >{\raggedright\arraybackslash}p{0.14\linewidth} >{\raggedright\arraybackslash}p{0.17\linewidth} >{\raggedright\arraybackslash}p{0.28\linewidth}}",
-                r"\toprule",
-                r"DNS Name & Zone & Live CA Families & Covering Subject CNs \\",
-                r"\midrule",
-            ]
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedright\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedright\arraybackslash}p{0.33\linewidth}",
+            ["DNS Name", "Zone", "Live CA Families", "Covering Subject CNs"],
+            top_caa_overlap_rows(caa_analysis),
+            font="footnotesize",
+            tabcolsep="3.2pt",
         )
-        for name, zone, families, subjects in top_caa_overlap_rows(caa_analysis):
-            lines.append(rf"{latex_escape(name)} & {latex_escape(zone)} & {latex_escape(families)} & {latex_escape(subjects)} \\")
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No current multi-family overlap names were found.")
     lines.append(
@@ -2169,17 +2232,14 @@ def render_latex(
     )
     lines.append(r"\subsection{Current Policy Mismatch}")
     if caa_analysis.policy_mismatch_names:
-        lines.extend(
-            [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.17\linewidth}}",
-                r"\toprule",
-                r"DNS Name & Zone & Live CA Families & CAA-Allowed Families & CAA Discovery Result \\",
-                r"\midrule",
-            ]
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedright\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.14\linewidth} >{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedright\arraybackslash}p{0.20\linewidth}",
+            ["DNS Name", "Zone", "Live CA Families", "CAA-Allowed Families", "CAA Discovery Result"],
+            top_caa_mismatch_rows(caa_analysis),
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for name, zone, families, allowed, result in top_caa_mismatch_rows(caa_analysis):
-            lines.append(rf"{latex_escape(name)} & {latex_escape(zone)} & {latex_escape(families)} & {latex_escape(allowed)} & {latex_escape(result)} \\")
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No current policy-mismatch names were found.")
     lines.append(
@@ -2210,34 +2270,31 @@ def render_latex(
         lines.extend(
             [
                 r"\subsection{Focused Cohort Versus The Rest Of The Estate}",
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.28\linewidth}}",
-                r"\toprule",
-                r"Comparison View & Focused Cohort & Rest Of Current Corpus & Why It Matters \\",
-                r"\midrule",
             ]
         )
-        for left, focus_value, rest_value, why in focus_comparison:
-            lines.append(
-                rf"{latex_escape(left)} & {latex_escape(focus_value)} & {latex_escape(rest_value)} & {latex_escape(why)} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedright\arraybackslash}p{0.31\linewidth}",
+            ["Comparison View", "Focused Cohort", "Rest Of Current Corpus", "Why It Matters"],
+            focus_comparison,
+            font="footnotesize",
+            tabcolsep="3.2pt",
+        )
         lines.extend(
             [
                 r"\subsection{Three Buckets Inside The Cohort}",
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedleft\arraybackslash}p{0.07\linewidth} >{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedright\arraybackslash}p{0.25\linewidth}}",
-                r"\toprule",
-                r"Bucket & Count & Representative Names & What It Looks Like & Why This Bucket Exists \\",
-                r"\midrule",
             ]
         )
-        for bucket, count, names, shape, why in focus_bucket_summary:
-            lines.append(
-                rf"{latex_escape(bucket)} & {latex_escape(count)} & {latex_escape(names)} & {latex_escape(shape)} & {latex_escape(why)} \\"
-            )
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.15\linewidth} >{\raggedleft\arraybackslash}p{0.06\linewidth} >{\raggedright\arraybackslash}p{0.19\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedright\arraybackslash}p{0.26\linewidth}",
+            ["Bucket", "Count", "Representative Names", "What It Looks Like", "Why This Bucket Exists"],
+            focus_bucket_summary,
+            font="footnotesize",
+            tabcolsep="3.0pt",
+        )
         lines.extend(
             [
-                r"\bottomrule",
-                r"\end{longtable}",
                 r"This bucket split is the key to making the cohort intelligible. The memorable names are not all from one naming methodology. Most are direct public fronts. A very small number are platform-anchor certificates with matrix SAN design. The rest are historical leftovers, carried aliases, or opaque labels whose original role is no longer cleanly visible in the current corpus.",
                 r"\subsection{Why This Cohort Feels Different}",
                 r"\begin{itemize}[leftmargin=1.4em]",
@@ -2254,43 +2311,42 @@ def render_latex(
         )
         lines.append(r"\subsection{Cross-Basket Carrying And Migration}")
         if focus_analysis.transition_rows:
-            lines.extend(
+            append_longtable(
+                lines,
+                r">{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedright\arraybackslash}p{0.19\linewidth} >{\raggedright\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.27\linewidth}",
+                ["Subject CN", "Current Basket Status", "Direct / Carried", "Max Overlap Days", "Carrier Subjects"],
                 [
-                    r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.23\linewidth} >{\raggedright\arraybackslash}p{0.21\linewidth} >{\raggedright\arraybackslash}p{0.12\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth}}",
-                    r"\toprule",
-                    r"Subject CN & Current Basket Status & Direct / Carried & Max Overlap Days & Carrier Subjects \\",
-                    r"\midrule",
-                ]
+                    [
+                        detail.subject_cn,
+                        detail.basket_status,
+                        f"{detail.current_direct_certificates}/{detail.current_non_focus_san_carriers + detail.historical_non_focus_san_carriers}",
+                        str(detail.max_direct_to_carrier_overlap_days),
+                        truncate_text(detail.carrier_subjects, 48),
+                    ]
+                    for detail in focus_analysis.transition_rows[:10]
+                ],
+                font="footnotesize",
+                tabcolsep="3.1pt",
             )
-            for detail in focus_analysis.transition_rows[:10]:
-                carried_total = detail.current_non_focus_san_carriers + detail.historical_non_focus_san_carriers
-                lines.append(
-                    rf"{latex_escape(detail.subject_cn)} & {latex_escape(detail.basket_status)} & {detail.current_direct_certificates}/{carried_total} & {detail.max_direct_to_carrier_overlap_days} & {latex_escape(truncate_text(detail.carrier_subjects, 48))} \\"
-                )
-            lines.extend([r"\bottomrule", r"\end{longtable}"])
         else:
             lines.append(r"No focused names were seen as SAN passengers inside non-focused certificates.")
         lines.append(
             r"This migration table answers a narrower question than the rest of the chapter. It asks whether these names were gradually absorbed into broader certificates from outside the cohort. The answer is: only in a limited number of cases. Some names do show SAN-passenger behavior or historical carrying, but that is not the dominant explanation for why the cohort feels different. The dominant explanation is the bucket split above: many remembered direct fronts, a few large platform anchors, and a band of legacy residue."
         )
-        lines.extend(
-            [
-                r"\subsection{Representative Names By Bucket}",
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.15\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.20\linewidth} >{\raggedright\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.27\linewidth}}",
-                r"\toprule",
-                r"Bucket & Subject CN & Observed Role & Direct C/H & Why It Helps Explain The Bucket \\",
-                r"\midrule",
-            ]
+        lines.append(r"\subsection{Representative Names By Bucket}")
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.14\linewidth} >{\raggedright\arraybackslash}p{0.17\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.30\linewidth}",
+            ["Bucket", "Subject CN", "Observed Role", "Direct C/H", "Why It Helps Explain The Bucket"],
+            focus_representatives,
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for row in focus_representatives:
-            lines.append(
-                rf"{latex_escape(row[0])} & {latex_escape(row[1])} & {latex_escape(row[2])} & {latex_escape(row[3])} & {latex_escape(row[4])} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
         lines.append(
             r"These examples are evidence anchors, not the whole population. The direct-front examples show the remembered public surface. The platform-anchor examples show the rare but important matrix certificates. The ambiguous examples show why the cohort cannot be reduced to a single neat story without losing the migration and legacy residue that made these names memorable in the first place."
         )
 
+    lines.append(r"\Needspace{12\baselineskip}")
     lines.append(r"\section{Making The Whole Estate Make Sense}")
     add_summary(
         [
@@ -2330,20 +2386,20 @@ def render_latex(
 
     lines.extend(
         [
+            r"\clearpage",
             r"\appendix",
             r"\section{Full Family Catalogue}",
             r"This appendix is a compact family map. It is not the place for full per-certificate evidence; that remains in the detailed inventory appendix at the end of the monograph.",
-            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.48\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth}}",
-            r"\toprule",
-            r"ID & Basis & Certs & CNs & Dominant Stack \\",
-            r"\midrule",
         ]
     )
-    for row in report["group_digest"]:
-        lines.append(
-            rf"{latex_escape(row['group_id'])} & {latex_escape(row['basis'])} & {row['certificates']} & {row['subjects']} & {latex_escape(first_list_item(row['top_stacks']))} \\"
-        )
-    lines.extend([r"\bottomrule", r"\end{longtable}"])
+    append_longtable(
+        lines,
+        r">{\raggedright\arraybackslash}p{0.56\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth}",
+        ["Family Basis", "Certs", "CNs", "Dominant Stack"],
+        family_rows,
+        font="footnotesize",
+        tabcolsep="3.0pt",
+    )
 
     lines.extend(
         [
@@ -2354,203 +2410,240 @@ def render_latex(
         ]
     )
     if assessment.current_red_flag_rows:
-        lines.extend(
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedright\arraybackslash}p{0.27\linewidth}",
+            ["Subject CN", "Live Certs", "Current Concern", "Supporting Context"],
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.29\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.25\linewidth} >{\raggedright\arraybackslash}p{0.26\linewidth}}",
-                r"\toprule",
-                r"Subject CN & Live Certs & Current Concern & Supporting Context \\",
-                r"\midrule",
-            ]
+                [
+                    row.subject_cn,
+                    str(row.current_certificate_count),
+                    row.flags,
+                    truncate_text(row.notes, 84),
+                ]
+                for row in assessment.current_red_flag_rows
+            ],
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for row in assessment.current_red_flag_rows:
-            lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.current_certificate_count} & {latex_escape(row.flags)} & {latex_escape(truncate_text(row.notes, 84))} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No current red flags were found.")
     lines.append(r"\subsection{Past Red-Flag Inventory Now Fixed}")
     if assessment.past_red_flag_rows:
-        lines.extend(
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedright\arraybackslash}p{0.27\linewidth}",
+            ["Subject CN", "Historic Certs", "Historical Concern", "Supporting Context"],
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.29\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.25\linewidth} >{\raggedright\arraybackslash}p{0.26\linewidth}}",
-                r"\toprule",
-                r"Subject CN & Historic Certs & Historical Concern & Supporting Context \\",
-                r"\midrule",
-            ]
+                [
+                    row.subject_cn,
+                    str(row.certificate_count),
+                    row.flags,
+                    truncate_text(row.notes, 84),
+                ]
+                for row in assessment.past_red_flag_rows
+            ],
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for row in assessment.past_red_flag_rows:
-            lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.certificate_count} & {latex_escape(row.flags)} & {latex_escape(truncate_text(row.notes, 84))} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No past-only red flags were found.")
     lines.append(r"\subsection{Current Overlap Red Flags}")
     if assessment.overlap_current_rows:
-        lines.extend(
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.21\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.51\linewidth}",
+            ["Subject CN", "Max Overlap Days", "Live Certs", "What The Renewal Family Looks Like"],
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.48\linewidth}}",
-                r"\toprule",
-                r"Subject CN & Max Overlap Days & Live Certs & What The Renewal Family Looks Like \\",
-                r"\midrule",
-            ]
+                [
+                    row.subject_cn,
+                    str(row.max_overlap_days),
+                    str(row.current_certificate_count),
+                    f"{row.lineage}; {overlap_signal(row.details)}",
+                ]
+                for row in assessment.overlap_current_rows
+            ],
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for row in assessment.overlap_current_rows:
-            lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.max_overlap_days} & {row.current_certificate_count} & {latex_escape(f'{row.lineage}; {overlap_signal(row.details)}')} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No current overlap red flags were found.")
     lines.append(r"\subsection{Past Overlap Red Flags Now Fixed}")
     if assessment.overlap_past_rows:
-        lines.extend(
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.21\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.52\linewidth}",
+            ["Subject CN", "Max Overlap Days", "Historic Certs", "What The Renewal Family Looks Like"],
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.47\linewidth}}",
-                r"\toprule",
-                r"Subject CN & Max Overlap Days & Historic Certs & What The Renewal Family Looks Like \\",
-                r"\midrule",
-            ]
+                [
+                    row.subject_cn,
+                    str(row.max_overlap_days),
+                    str(row.asset_variant_count),
+                    f"{row.lineage}; {overlap_signal(row.details)}",
+                ]
+                for row in assessment.overlap_past_rows
+            ],
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for row in assessment.overlap_past_rows:
-            lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.max_overlap_days} & {row.asset_variant_count} & {latex_escape(f'{row.lineage}; {overlap_signal(row.details)}')} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No past overlap red flags were found.")
     lines.append(r"\subsection{Current Subject-DN Drift}")
     if assessment.dn_current_rows:
-        lines.extend(
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.25\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.45\linewidth}",
+            ["Subject CN", "Distinct Subject DNs", "Live Certs", "Subject DN Samples"],
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.26\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.43\linewidth}}",
-                r"\toprule",
-                r"Subject CN & Distinct Subject DNs & Live Certs & Subject DN Samples \\",
-                r"\midrule",
-            ]
+                [
+                    row.subject_cn,
+                    str(row.distinct_value_count),
+                    str(row.current_certificate_count),
+                    truncate_text(row.details, 92),
+                ]
+                for row in assessment.dn_current_rows
+            ],
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for row in assessment.dn_current_rows:
-            lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.distinct_value_count} & {row.current_certificate_count} & {latex_escape(truncate_text(row.details, 92))} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No current Subject-DN drift was found.")
     lines.append(r"\subsection{Past Subject-DN Drift Now Fixed}")
     if assessment.dn_past_rows:
-        lines.extend(
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.25\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.45\linewidth}",
+            ["Subject CN", "Distinct Subject DNs", "Historic Certs", "Subject DN Samples"],
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.26\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedright\arraybackslash}p{0.41\linewidth}}",
-                r"\toprule",
-                r"Subject CN & Distinct Subject DNs & Historic Certs & Subject DN Samples \\",
-                r"\midrule",
-            ]
+                [
+                    row.subject_cn,
+                    str(row.distinct_value_count),
+                    str(row.certificate_count),
+                    truncate_text(row.details, 92),
+                ]
+                for row in assessment.dn_past_rows
+            ],
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for row in assessment.dn_past_rows:
-            lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.distinct_value_count} & {row.certificate_count} & {latex_escape(truncate_text(row.details, 92))} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No past-only Subject-DN drift was found.")
     lines.append(r"\subsection{Current CA-Family Drift}")
     if assessment.vendor_current_rows:
-        lines.extend(
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.45\linewidth}",
+            ["Subject CN", "Distinct CA Families", "Live Certs", "CA Families Seen"],
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.42\linewidth}}",
-                r"\toprule",
-                r"Subject CN & Distinct CA Families & Live Certs & CA Families Seen \\",
-                r"\midrule",
-            ]
+                [
+                    row.subject_cn,
+                    str(row.distinct_value_count),
+                    str(row.current_certificate_count),
+                    truncate_text(row.details, 92),
+                ]
+                for row in assessment.vendor_current_rows
+            ],
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for row in assessment.vendor_current_rows:
-            lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.distinct_value_count} & {row.current_certificate_count} & {latex_escape(truncate_text(row.details, 92))} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No current CA-family drift was found.")
     lines.append(r"\subsection{Past CA-Family Drift Now Fixed}")
     if assessment.vendor_past_rows:
-        lines.extend(
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.27\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.45\linewidth}",
+            ["Subject CN", "Distinct CA Families", "Historic Certs", "CA Families Seen"],
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.28\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedright\arraybackslash}p{0.40\linewidth}}",
-                r"\toprule",
-                r"Subject CN & Distinct CA Families & Historic Certs & CA Families Seen \\",
-                r"\midrule",
-            ]
+                [
+                    row.subject_cn,
+                    str(row.distinct_value_count),
+                    str(row.certificate_count),
+                    truncate_text(row.details, 92),
+                ]
+                for row in assessment.vendor_past_rows
+            ],
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for row in assessment.vendor_past_rows:
-            lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.distinct_value_count} & {row.certificate_count} & {latex_escape(truncate_text(row.details, 92))} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No past-only CA-family drift was found.")
     lines.append(r"\subsection{Current SAN Drift}")
     if assessment.san_current_rows:
-        lines.extend(
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.21\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.35\linewidth}",
+            ["Subject CN", "Profiles", "Live Certs", "Delta Pattern", "Representative Delta"],
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.32\linewidth}}",
-                r"\toprule",
-                r"Subject CN & Profiles & Live Certs & Delta Pattern & Representative Delta \\",
-                r"\midrule",
-            ]
+                [
+                    row.subject_cn,
+                    str(row.distinct_san_profiles),
+                    str(row.current_certificate_count),
+                    row.delta_pattern,
+                    truncate_text(row.representative_delta, 92),
+                ]
+                for row in assessment.san_current_rows
+            ],
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for row in assessment.san_current_rows:
-            lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.distinct_san_profiles} & {row.current_certificate_count} & {latex_escape(row.delta_pattern)} & {latex_escape(truncate_text(row.representative_delta, 92))} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No current SAN drift was found.")
     lines.append(r"\subsection{Past SAN Drift Now Fixed}")
     if assessment.san_past_rows:
-        lines.extend(
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.21\linewidth} >{\raggedleft\arraybackslash}p{0.08\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.35\linewidth}",
+            ["Subject CN", "Profiles", "Historic Certs", "Delta Pattern", "Representative Delta"],
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedleft\arraybackslash}p{0.11\linewidth} >{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.30\linewidth}}",
-                r"\toprule",
-                r"Subject CN & Profiles & Historic Certs & Delta Pattern & Representative Delta \\",
-                r"\midrule",
-            ]
+                [
+                    row.subject_cn,
+                    str(row.distinct_san_profiles),
+                    str(row.certificate_count),
+                    row.delta_pattern,
+                    truncate_text(row.representative_delta, 92),
+                ]
+                for row in assessment.san_past_rows
+            ],
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for row in assessment.san_past_rows:
-            lines.append(
-                rf"{latex_escape(row.subject_cn)} & {row.distinct_san_profiles} & {row.certificate_count} & {latex_escape(row.delta_pattern)} & {latex_escape(truncate_text(row.representative_delta, 92))} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No past-only SAN drift was found.")
     lines.append(r"\subsection{Historic Start Dates}")
-    lines.extend(
+    append_longtable(
+        lines,
+        r">{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.62\linewidth}",
+        ["Start Day", "Certificates", "Dominant Driver"],
         [
-            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.62\linewidth}}",
-            r"\toprule",
-            r"Start Day & Certificates & Dominant Driver \\",
-            r"\midrule",
-        ]
+            [
+                row.start_day,
+                str(row.certificate_count),
+                driver_summary(row.top_subjects, row.top_issuers),
+            ]
+            for row in assessment.day_rows
+        ],
+        font="footnotesize",
+        tabcolsep="3.0pt",
     )
-    for row in assessment.day_rows:
-        lines.append(
-            rf"{latex_escape(row.start_day)} & {row.certificate_count} & {latex_escape(driver_summary(row.top_subjects, row.top_issuers))} \\"
-        )
-    lines.extend([r"\bottomrule", r"\end{longtable}"])
     lines.append(r"\subsection{Historic Step Weeks}")
     if assessment.week_rows:
-        lines.extend(
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedleft\arraybackslash}p{0.13\linewidth} >{\raggedright\arraybackslash}p{0.52\linewidth}",
+            ["Week Start", "Certs", "Prior 8-Week Avg", "Dominant Driver"],
             [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.16\linewidth} >{\raggedleft\arraybackslash}p{0.09\linewidth} >{\raggedleft\arraybackslash}p{0.13\linewidth} >{\raggedright\arraybackslash}p{0.52\linewidth}}",
-                r"\toprule",
-                r"Week Start & Certs & Prior 8-Week Avg & Dominant Driver \\",
-                r"\midrule",
-            ]
+                [
+                    row.week_start,
+                    str(row.certificate_count),
+                    row.prior_eight_week_avg,
+                    driver_summary(row.top_subjects, row.top_issuers),
+                ]
+                for row in assessment.week_rows
+            ],
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for row in assessment.week_rows:
-            lines.append(
-                rf"{latex_escape(row.week_start)} & {row.certificate_count} & {latex_escape(row.prior_eight_week_avg)} & {latex_escape(driver_summary(row.top_subjects, row.top_issuers))} \\"
-            )
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     else:
         lines.append(r"No step weeks met the threshold.")
 
@@ -2559,29 +2652,27 @@ def render_latex(
             r"\section{CAA Policy Detail}",
             r"This appendix keeps the issuance-policy evidence inside the monograph. It answers a narrower question than the DNS appendix: not where a name lands, but which public CA families DNS currently authorizes to issue for that name.",
             r"\subsection{CAA Discovery Paths}",
-            r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.54\linewidth}}",
-            r"\toprule",
-            r"CAA Discovery Result & Names & Meaning \\",
-            r"\midrule",
         ]
     )
-    for label, count, meaning in caa_source_rows(caa_analysis):
-        lines.append(rf"{latex_escape(label)} & {latex_escape(count)} & {latex_escape(meaning)} \\")
-    lines.extend([r"\bottomrule", r"\end{longtable}"])
+    append_longtable(
+        lines,
+        r">{\raggedright\arraybackslash}p{0.23\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.55\linewidth}",
+        ["CAA Discovery Result", "Names", "Meaning"],
+        caa_source_rows(caa_analysis),
+        font="footnotesize",
+        tabcolsep="3.0pt",
+    )
     lines.append(r"\subsection{Policy Regimes By Configured Zone}")
     for zone in caa_analysis.configured_domains:
         lines.append(rf"\subsubsection{{{latex_escape(zone)}}}")
-        lines.extend(
-            [
-                r"\begin{longtable}{>{\raggedright\arraybackslash}p{0.25\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.53\linewidth}}",
-                r"\toprule",
-                r"Policy Regime & Names & Plain-Language Meaning \\",
-                r"\midrule",
-            ]
+        append_longtable(
+            lines,
+            r">{\raggedright\arraybackslash}p{0.24\linewidth} >{\raggedleft\arraybackslash}p{0.10\linewidth} >{\raggedright\arraybackslash}p{0.56\linewidth}",
+            ["Policy Regime", "Names", "Plain-Language Meaning"],
+            caa_zone_rows[zone],
+            font="footnotesize",
+            tabcolsep="3.0pt",
         )
-        for regime, count, meaning in caa_zone_rows[zone]:
-            lines.append(rf"{latex_escape(regime)} & {latex_escape(count)} & {latex_escape(meaning)} \\")
-        lines.extend([r"\bottomrule", r"\end{longtable}"])
     lines.append(r"\subsection{Current Multi-Family Overlap}")
     if caa_analysis.multi_family_overlap_names:
         lines.extend(
