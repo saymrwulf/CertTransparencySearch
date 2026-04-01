@@ -1703,9 +1703,6 @@ def render_latex(
         r"\usepackage[most]{tcolorbox}",
         r"\usepackage{pdfpages}",
         r"\defaultfontfeatures{Ligatures=TeX,Scale=MatchLowercase}",
-        r"\setmainfont{Palatino}",
-        r"\setsansfont{Avenir Next}",
-        r"\setmonofont{Menlo}",
         r"\definecolor{Ink}{HTML}{17202A}",
         r"\definecolor{Muted}{HTML}{667085}",
         r"\definecolor{Line}{HTML}{D0D5DD}",
@@ -1723,8 +1720,11 @@ def render_latex(
         r"\pagestyle{plain}",
         r"\titleformat{\section}{\sffamily\bfseries\LARGE\color{Ink}\raggedright}{\thesection}{0.8em}{}",
         r"\titleformat{\subsection}{\sffamily\bfseries\Large\color{Ink}\raggedright}{\thesubsection}{0.8em}{}",
+        r"\titleformat{\subsubsection}{\sffamily\bfseries\normalsize\color{Ink}\raggedright}{\thesubsubsection}{0.8em}{}",
         r"\tcbset{panel/.style={enhanced,breakable,boxrule=0.55pt,arc=3pt,left=9pt,right=9pt,top=8pt,bottom=8pt,colback=white,colframe=Line}}",
-        r"\newcommand{\SummaryBox}[1]{\begin{tcolorbox}[panel,colback=Panel]#1\end{tcolorbox}}",
+        r"\newcommand{\SummaryBox}[1]{\begin{tcolorbox}[enhanced,boxrule=0.55pt,arc=3pt,left=9pt,right=9pt,top=8pt,bottom=8pt,colback=Panel,colframe=Line]#1\end{tcolorbox}}",
+        r"\newcommand{\SoftSubsection}[1]{\Needspace{12\baselineskip}\subsection{#1}}",
+        r"\newcommand{\SoftSubsubsection}[1]{\Needspace{10\baselineskip}\subsubsection{#1}}",
         r"\begin{document}",
         r"\begin{titlepage}",
         r"\vspace*{16mm}",
@@ -1743,7 +1743,11 @@ def render_latex(
         + rf"{purpose_summary.category_counts.get('tls_server_and_client', 0)} certificates from templates that also permit client-certificate use."
         + r"}",
         r"\end{titlepage}",
+        r"\begingroup",
+        r"\small",
+        r"\setlength{\parskip}{2pt}",
         r"\tableofcontents",
+        r"\endgroup",
         r"\clearpage",
     ]
 
@@ -2744,7 +2748,17 @@ def render_latex(
             r"\end{document}",
         ]
     )
-    args.latex_output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    def soften_heading(line: str) -> str:
+        if line.startswith(r"\subsection{"):
+            return line.replace(r"\subsection{", r"\SoftSubsection{", 1)
+        if line.startswith(r"\subsubsection{"):
+            return line.replace(r"\subsubsection{", r"\SoftSubsubsection{", 1)
+        return line
+
+    args.latex_output.write_text(
+        "\n".join(soften_heading(line) for line in lines) + "\n",
+        encoding="utf-8",
+    )
 
 
 def main() -> int:

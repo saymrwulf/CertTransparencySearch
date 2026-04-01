@@ -19,7 +19,7 @@ The project is designed for public source control:
 
 None of those paths should be committed.
 
-## What You Need On A Fresh Machine
+## What You Need On A Fresh macOS Machine
 
 ### Required software
 
@@ -38,7 +38,71 @@ None of those paths should be committed.
 
 If `xelatex` is missing, the Markdown and LaTeX outputs can still be generated, but the PDF targets will fail.
 
-## Fresh Install On Another Computer
+### Network access required
+
+- outbound TCP access to `crt.sh:5432`
+- public DNS resolution for `dig`
+
+The scanner reads Certificate Transparency data directly from the public `certwatch` PostgreSQL service on `crt.sh` using guest access. If that TCP path is blocked, the certificate part of the run will fail even if normal web browsing works.
+
+## Clean-Room Operator Checklist
+
+Use this sequence if you need to reproduce the same output structure on another Mac without any extra guidance:
+
+1. Install the required macOS system tools.
+2. Clone the repository.
+3. Create the Python virtual environment and install Python dependencies.
+4. Create the local-only config files.
+5. Put the real search terms into `domains.local.txt`.
+6. Optionally put the focused Subject-CN cohort into `focus_subjects.local.txt`.
+7. Run `make monograph`.
+8. Read the outputs from `output/corpus/`.
+
+Expected final outputs:
+
+- `output/corpus/monograph.md`
+- `output/corpus/monograph.tex`
+- `output/corpus/monograph.pdf`
+
+The PDF build no longer depends on macOS-only fonts.
+
+## macOS Install Recipe
+
+Install Apple command-line tools first:
+
+```bash
+xcode-select --install
+```
+
+If Homebrew is not already installed, install it from `https://brew.sh`, then install the required tools:
+
+```bash
+brew install python make
+brew install --cask mactex-no-gui
+```
+
+Notes:
+
+- `git`, `make`, and `dig` are usually already present once Apple command-line tools are installed.
+- `mactex-no-gui` provides `xelatex`.
+- If `xelatex` is still not on your `PATH` after installation, open a new shell and re-run `which xelatex`.
+
+## Preflight Checks
+
+Run these checks before the first full build:
+
+```bash
+python3 --version
+git --version
+make --version
+dig -v
+xelatex --version
+nc -vz crt.sh 5432
+```
+
+If the last command fails, the CT query layer will not be able to reach the public `certwatch` database.
+
+## Fresh Install On Another Mac
 
 Clone the repository from your chosen remote and enter the directory:
 
@@ -62,6 +126,26 @@ make init-config
 Then edit `domains.local.txt` and replace the placeholder values with the real search terms you want to scan.
 
 If you want the monograph to analyse a remembered or suspicious Subject-CN cohort as well, edit `focus_subjects.local.txt` too. The format is one Subject CN per line, optionally followed by analyst notes in parentheses.
+
+## Fastest End-To-End Run
+
+If the Mac already has the required system tools installed, this is the shortest full path:
+
+```bash
+git clone <repository-url>
+cd CertTransparencySearch
+make bootstrap
+make init-config
+# edit domains.local.txt
+# optionally edit focus_subjects.local.txt
+make monograph
+```
+
+The canonical results will then be in:
+
+- `output/corpus/monograph.md`
+- `output/corpus/monograph.tex`
+- `output/corpus/monograph.pdf`
 
 ## Local Search Terms
 

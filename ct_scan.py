@@ -755,7 +755,7 @@ def build_san_tree_lines(san_entries: list[str]) -> list[str]:
     return build_san_tree_lines_with_style(san_entries, ascii_only=False)
 
 
-def build_san_tree_lines_with_style(san_entries: list[str], ascii_only: bool) -> list[str]:
+def build_san_tree_units_with_style(san_entries: list[str], ascii_only: bool) -> list[list[str]]:
     dns_entries = sorted({entry[4:] for entry in san_entries if entry.startswith("DNS:")})
     other_entries = sorted({entry for entry in san_entries if not entry.startswith("DNS:")})
     tree: dict[str, Any] = {}
@@ -784,11 +784,55 @@ def build_san_tree_lines_with_style(san_entries: list[str], ascii_only: bool) ->
             lines.extend(render(child, child_prefix))
         return lines
 
-    lines = render(tree)
+    units: list[list[str]] = []
+    for key in sorted(tree.keys(), key=str.casefold):
+        units.append(render({key: tree[key]}))
     for entry in other_entries:
-        lines.append(f"{'*' if ascii_only else '•'} {entry}")
-    if not lines:
-        lines.append(f"{'*' if ascii_only else '•'} -")
+        units.append([f"{'*' if ascii_only else '•'} {entry}"])
+    if not units:
+        units.append([f"{'*' if ascii_only else '•'} -"])
+    return units
+
+
+def build_san_tree_chunks_with_style(
+    san_entries: list[str],
+    ascii_only: bool,
+    max_lines_per_chunk: int = 24,
+) -> list[list[str]]:
+    chunks: list[list[str]] = []
+    current_chunk: list[str] = []
+    current_lines = 0
+
+    def flush_current_chunk() -> None:
+        nonlocal current_chunk, current_lines
+        if current_chunk:
+            chunks.append(current_chunk)
+            current_chunk = []
+            current_lines = 0
+
+    for unit in build_san_tree_units_with_style(san_entries, ascii_only=ascii_only):
+        if len(unit) > max_lines_per_chunk:
+            flush_current_chunk()
+            for start in range(0, len(unit), max_lines_per_chunk):
+                chunks.append(unit[start : start + max_lines_per_chunk])
+            continue
+        if current_chunk and current_lines + len(unit) > max_lines_per_chunk:
+            flush_current_chunk()
+        current_chunk.extend(unit)
+        current_lines += len(unit)
+
+    flush_current_chunk()
+    return chunks
+
+
+def build_san_tree_lines_with_style(san_entries: list[str], ascii_only: bool) -> list[str]:
+    lines: list[str] = []
+    for chunk in build_san_tree_chunks_with_style(
+        san_entries,
+        ascii_only=ascii_only,
+        max_lines_per_chunk=10_000,
+    ):
+        lines.extend(chunk)
     return lines
 
 
@@ -1033,9 +1077,6 @@ def render_latex_report(
         r"\usepackage{fancyvrb}",
         r"\usepackage{needspace}",
         r"\defaultfontfeatures{Ligatures=TeX,Scale=MatchLowercase}",
-        r"\setmainfont{Palatino}",
-        r"\setsansfont{Avenir Next}",
-        r"\setmonofont{Menlo}",
         r"\definecolor{Ink}{HTML}{17202A}",
         r"\definecolor{Muted}{HTML}{667085}",
         r"\definecolor{Line}{HTML}{D0D5DD}",
@@ -1071,7 +1112,7 @@ def render_latex_report(
         r"  issuerpanel/.style={panel,colback=Panel,colframe=Ink!45},",
         r"  familypanel/.style={panel,colback=AccentSoft,colframe=AccentLine},",
         r"  subjectpanel/.style={panel,colback=white,colframe=Line},",
-        r"  treepanel/.style={panel,colback=Panel,colframe=AccentLine},",
+        r"  treepanel/.style={enhanced,boxrule=0.55pt,arc=3pt,left=9pt,right=9pt,top=8pt,bottom=8pt,colback=Panel,colframe=AccentLine},",
         r"}",
         r"\newcommand{\DomainChip}[1]{\tcbox[on line,boxrule=0pt,arc=3pt,left=5pt,right=5pt,top=2pt,bottom=2pt,colback=AccentSoft]{\sffamily\footnotesize\texttt{#1}}}",
         r"\newcommand{\MetricChip}[2]{\tcbox[on line,boxrule=0pt,arc=3pt,left=6pt,right=6pt,top=3pt,bottom=3pt,colback=Panel]{\sffamily\footnotesize\textcolor{Muted}{#1}\hspace{0.45em}\textbf{#2}}}",
@@ -1225,6 +1266,11 @@ def render_latex_report(
                             rf"\newline \textcolor{{Muted}}{{SANs: {len(hit.san_entries)} \quad crt.sh: {latex_escape(crtsh_ids)} \quad {latex_escape(one_line_revocation(hit))}}}",
                         ]
                     )
+                tree_chunks = build_san_tree_chunks_with_style(
+                    unique_san_entries,
+                    ascii_only=True,
+                    max_lines_per_chunk=24,
+                )
                 lines.extend(
                     [
                         r"\end{itemize}",
@@ -1240,18 +1286,35 @@ def render_latex_report(
                         rf"\textbf{{Dominant zones}}: {latex_escape(', '.join(f'{zone} ({count})' for zone, count in san_summary['top_zones']) if san_summary['top_zones'] else 'none')}",
                         r"\par",
                         rf"\textbf{{Repeating host schemas}}: {latex_escape(', '.join(f'{pattern} ({count})' for pattern, count in san_summary['repeating_patterns']) if san_summary['repeating_patterns'] else 'mostly one-off SAN hostnames')}",
-                        r"\end{tcolorbox}",
-                        r"\begin{tcolorbox}[treepanel,title={SAN Structure}]",
-                        r"\begin{Verbatim}[fontsize=\footnotesize]",
-                    ]
-                )
-                lines.extend(build_san_tree_lines_with_style(unique_san_entries, ascii_only=True))
-                lines.extend(
-                    [
-                        r"\end{Verbatim}",
+                        (
+                            rf"\par\medskip\textcolor{{Muted}}{{The SAN structure below is shown in {len(tree_chunks)} intact panels so the visual grouping is not broken across a page.}}"
+                            if len(tree_chunks) > 1
+                            else ""
+                        ),
                         r"\end{tcolorbox}",
                     ]
                 )
+                for tree_chunk_index, tree_lines in enumerate(tree_chunks, start=1):
+                    tree_title = (
+                        "SAN Structure"
+                        if len(tree_chunks) == 1
+                        else f"SAN Structure ({tree_chunk_index}/{len(tree_chunks)})"
+                    )
+                    tree_needspace = max(12, min(len(tree_lines) + 7, 32))
+                    lines.extend(
+                        [
+                            rf"\Needspace{{{tree_needspace}\baselineskip}}",
+                            rf"\begin{{tcolorbox}}[treepanel,title={{{latex_escape(tree_title)}}}]",
+                            r"\begin{Verbatim}[fontsize=\footnotesize]",
+                        ]
+                    )
+                    lines.extend(tree_lines)
+                    lines.extend(
+                        [
+                            r"\end{Verbatim}",
+                            r"\end{tcolorbox}",
+                        ]
+                    )
 
     lines.extend(
         [
